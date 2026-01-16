@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <title>Logga in - Zalaso Mail</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>@import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap'); body { font-family: 'Google Sans', sans-serif; }</style>
+</head>
+<body class="bg-[#f6f8fc] h-screen flex items-center justify-center">
+    <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm">
+        <div class="flex justify-center mb-6">
+            <img src="{{ url_for('static', filename='zalaso.png') }}" alt="Zalaso" class="h-16 object-contain">
+        </div>
+        <h1 class="text-2xl font-bold text-center text-gray-800 mb-6">{{ t['login'] }}</h1>
+        
+        {% if error %}
+        <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4 text-sm text-center">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="POST" class="space-y-4">
+            <!-- Dold användarnamn-input för att hjälpa webbläsare att spara lösenordet -->
+            <div class="h-0 overflow-hidden">
+                <input type="text" name="username" value="Admin" autocomplete="username" tabindex="-1">
+            </div>
+            
+            <div class="relative">
+                <input type="password" id="password" name="password" placeholder="{{ t['password'] }}" autocomplete="current-password" class="w-full p-3 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition pr-12" autofocus>
+                <button type="button" onclick="const el = document.getElementById('password'); el.type = el.type === 'password' ? 'text' : 'password'; this.textContent = el.type === 'password' ? '👁️' : '🔒'" class="absolute right-3 top-1/2 transform -translate-y-1/2 text-xl cursor-pointer hover:opacity-70 transition focus:outline-none" title="Visa/Dölj lösenord">👁️</button>
+            </div>
+            <div class="flex items-center">
+                <input id="remember" name="remember" type="checkbox" class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
+                <label for="remember" class="ml-2 block text-sm text-gray-900">{{ t['remember_me'] }}</label>
+            </div>
+            <button type="submit" class="w-full bg-blue-600 text-white font-bold py-3 rounded-lg hover:bg-blue-700 transition shadow-md">{{ t['login'] }}</button>
+            <div class="text-center mt-4">
+                <a href="#" onclick="alert('Lösenordet sparas i settings.json på servern.')" class="text-sm text-gray-500 hover:text-blue-600 transition">{{ t['forgot_password'] }}</a>
+            </div>
+        </form>
+    </div>
+</body>
+</html>

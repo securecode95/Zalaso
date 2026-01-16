@@ -1,0 +1,1412 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <title>Zalaso Mail</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="//unpkg.com/alpinejs" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap');
+        body { font-family: 'Google Sans', sans-serif; background: #f6f8fc; margin:0; height: 100vh; overflow: hidden; }
+        .mail-box { background: white; border-radius: 12px; border: 1px solid #f1f3f4; position: relative; margin-bottom: 20px; }
+        .mail-frame { width: 100%; min-height: 100px; border: none; display: block; }
+        [x-cloak] { display: none !important; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-thumb { background: #dadce0; border-radius: 4px; }
+        #reply-editor, #compose-editor { overflow-wrap: break-word; word-wrap: break-word; }
+        #reply-editor pre, #compose-editor pre { white-space: pre-wrap; word-wrap: break-word; }
+        #reply-editor img, #compose-editor img { max-width: 100%; height: auto; }
+        #doc-preview-content table { border-collapse: collapse; width: 100%; font-size: 13px; }
+        #doc-preview-content th, #doc-preview-content td { border: 1px solid #e5e7eb; padding: 8px 12px; text-align: left; white-space: nowrap; }
+        #doc-preview-content tr:nth-child(even) { background-color: #f9fafb; }
+        #doc-preview-content tr:hover { background-color: #f3f4f6; }
+    </style>
+    <script>
+        window.ZalasoConfig = {
+            signature: {{ settings.get('signature', '') | tojson }},
+            currentFolder: {{ current_folder | tojson }},
+            trashFolderId: {{ trash_folder_id | tojson }},
+            query: {{ (query or '') | tojson }},
+            allThreadIds: [{% for id in threads %}{{ id | tojson }},{% endfor %}],
+            allUids: [{% for id, data in threads.items() %}{{ data['msgs'][0]['uid'] | tojson }},{% endfor %}],
+            starredUids: [{% for id, data in threads.items() if data['starred'] %}{{ data['msgs'][0]['uid'] | tojson }},{% endfor %}],
+            translations: {{ t | tojson }}
+        };
+
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('mailApp', () => ({
+                activeThread: null,
+                showSettings: false,
+                showCompose: false,
+                showCreateFolder: false,
+                newFolderName: '',
+                availableIcons: [],
+                selectedIcon: '',
+                replyTarget: null,
+                replyTo: '',
+                replySubj: '',
+                replyBody: '',
+                attachments: [],
+                forwardAttachments: [],
+                isForward: false,
+                selectedMails: [],
+                composeTo: '',
+                composeSubj: '',
+                composeBody: '',
+                deletedUids: [],
+                undoTimeout: null,
+                showUndo: false,
+                mailsToDelete: [],
+                composeAttachments: [],
+                starredUids: window.ZalasoConfig.starredUids,
+                signature: window.ZalasoConfig.signature,
+                contactSuggestions: [],
+                showContactSuggestions: false,
+                contactSearchTimeout: null,
+                replyContactSuggestions: [],
+                showReplyContactSuggestions: false,
+                replyContactSearchTimeout: null,
+                currentFolder: window.ZalasoConfig.currentFolder,
+                trashFolderId: window.ZalasoConfig.trashFolderId,
+                allThreadIds: window.ZalasoConfig.allThreadIds,
+                allUids: window.ZalasoConfig.allUids,
+                isSavingDraft: false,
+                isSending: false,
+                uploadProgress: 0,
+                showMoveUndo: false,
+                mailsToMove: [],
+                moveDestination: '',
+                moveTimeout: null,
+                isSendingLogs: false,
+                previewDocOpen: false,
+                previewHtml: '',
+                previewFilename: '',
+                t: window.ZalasoConfig.translations,
+
+                async previewDoc(url, filename, type) {
+                    this.previewFilename = filename;
+                    this.previewDocOpen = true;
+                    this.previewHtml = '<div class="flex justify-center items-center h-full"><div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div></div>';
+                    
+                    try {
+                        const response = await fetch(url);
+                        const arrayBuffer = await response.arrayBuffer();
+                        
+                        if (type === 'excel') {
+                            const data = new Uint8Array(arrayBuffer);
+                            const workbook = XLSX.read(data, {type: 'array'});
+                            const firstSheetName = workbook.SheetNames[0];
+                            const worksheet = workbook.Sheets[firstSheetName];
+                            this.previewHtml = XLSX.utils.sheet_to_html(worksheet);
+                        } else if (type === 'word') {
+                            const result = await mammoth.convertToHtml({arrayBuffer: arrayBuffer});
+                            this.previewHtml = `<div class="prose max-w-none p-8 bg-white shadow-sm mx-auto min-h-full text-black">${result.value}</div>`;
+                        }
+                    } catch (e) { this.previewHtml = '<div class="flex justify-center items-center h-full text-red-500">Kunde inte läsa filen.</div>'; }
+                },
+
+                parseJSON(str) {
+                    try { return JSON.parse(str); } catch(e) { console.error(e); return {}; }
+                },
+                async fetchBodyIfNeeded(m) {
+                    if (!m.body) {
+                        try {
+                            const res = await fetch(`/api/get_message/${m.uid}?folder=${encodeURIComponent(this.currentFolder)}`);
+                            const data = await res.json();
+                            if(data.body_safe) {
+                                m.body = data.body_safe;
+                                // Uppdatera attachments om de saknas
+                                if((!m.attachments || m.attachments.length === 0) && data.attachments) {
+                                    m.attachments = data.attachments;
+                                }
+                            }
+                        } catch(e) { console.error(e); }
+                    }
+                    return m;
+                },
+                async replyToMsg(jsonStr) {
+                    let m = this.parseJSON(jsonStr);
+                    if(m.tid) this.activeThread = m.tid;
+                    if(!m.uid && m.uids) m.uid = m.uids.split(',')[0];
+                    m = await this.fetchBodyIfNeeded(m);
+                    this.$nextTick(() => {
+                        if(m.uid) this.openReply(m.uid, m.from, 'Sv: ' + m.subject, m.body, m.attachments);
+                    });
+                },
+                async forwardMsg(jsonStr) {
+                    let m = this.parseJSON(jsonStr);
+                    if(m.tid) this.activeThread = m.tid;
+                    if(!m.uid && m.uids) m.uid = m.uids.split(',')[0];
+                    m = await this.fetchBodyIfNeeded(m);
+                    this.$nextTick(() => {
+                        if(m.uid) this.openReply(m.uid, '', 'Vb: ' + m.subject, m.body, m.attachments);
+                    });
+                },
+                async openCtxMenu(e, jsonStr, unread) {
+                    let ctx = this.parseJSON(jsonStr);
+                    // Hämta inte body direkt vid högerklick för att spara tid, 
+                    // men vi kan behöva den om användaren väljer Svara/Vidarebefordra från menyn.
+                    // Vi låter menyn öppnas direkt och hämtar vid klick i menyn istället.
+                    if(ctx.id) this.openContextMenu(e, ctx.id, ctx.uids, ctx.from, ctx.subject, ctx.body, unread, ctx.attachments);
+                },
+
+                init() {
+                    const p = new URLSearchParams(window.location.search);
+                    const t = p.get('thread');
+                    if(t) this.activeThread = t;
+                    window.addEventListener('popstate', () => {
+                        const p = new URLSearchParams(window.location.search);
+                        const t = p.get('thread');
+                        this.activeThread = t || null;
+                    });
+
+                    this.$watch('showCompose', v => !v && this.saveDraft());
+                    window.addEventListener('beforeunload', (e) => { 
+                        if (this.showUndo) {
+                            const fd = new FormData();
+                            fd.append('folder', this.currentFolder);
+                            this.mailsToDelete.forEach(u => fd.append('uids[]', u));
+                            navigator.sendBeacon('/api/delete_mails', fd);
+                        }
+                        if (this.showMoveUndo) {
+                            const fd = new FormData();
+                            fd.append('folder', this.currentFolder);
+                            fd.append('uids', this.mailsToMove.join(','));
+                            fd.append('dest', this.moveDestination);
+                            navigator.sendBeacon('/api/move_mail', fd);
+                        }
+                        if (this.showCompose && (this.composeTo || this.composeSubj || (this.composeBody && this.composeBody.trim() !== (this.signature ? this.signature.trim() : '')))) {
+                            e.preventDefault();
+                            e.returnValue = this.t.unsaved_changes;
+                        }
+                    });
+                },
+
+                onContactInput() {
+                    if (this.contactSearchTimeout) clearTimeout(this.contactSearchTimeout);
+                    this.contactSearchTimeout = setTimeout(() => this.fetchContactSuggestions(), 300);
+                },
+                async fetchContactSuggestions() {
+                    if (this.composeTo.length < 2) { this.contactSuggestions = []; this.showContactSuggestions = false; return; }
+                    try {
+                        const res = await fetch(`/api/contact_suggestions?q=${encodeURIComponent(this.composeTo)}`);
+                        this.contactSuggestions = await res.json();
+                        this.showContactSuggestions = this.contactSuggestions.length > 0;
+                    } catch(e) { this.contactSuggestions = []; }
+                },
+                onReplyContactInput() {
+                    if (this.replyContactSearchTimeout) clearTimeout(this.replyContactSearchTimeout);
+                    this.replyContactSearchTimeout = setTimeout(() => this.fetchReplyContactSuggestions(), 300);
+                },
+                async fetchReplyContactSuggestions() {
+                    if (this.replyTo.length < 2) { this.replyContactSuggestions = []; this.showReplyContactSuggestions = false; return; }
+                    try {
+                        const res = await fetch(`/api/contact_suggestions?q=${encodeURIComponent(this.replyTo)}`);
+                        this.replyContactSuggestions = await res.json();
+                        this.showReplyContactSuggestions = this.replyContactSuggestions.length > 0;
+                    } catch(e) { this.replyContactSuggestions = []; }
+                },
+                openThread(id) {
+                    if (this.activeThread === id) return;
+                    this.activeThread = id;
+                    const url = new URL(window.location);
+                    url.searchParams.set('thread', id);
+                    history.pushState({}, '', url);
+                },
+                closeThread() {
+                    this.activeThread = null;
+                    const url = new URL(window.location);
+                    if (url.searchParams.has('thread')) {
+                        url.searchParams.delete('thread');
+                        history.pushState({}, '', url);
+                    }
+                },
+                async goToFolder(folderId) {
+                    if (this.showUndo) {
+                        clearTimeout(this.undoTimeout);
+                        await this.finalizeDelete(false);
+                    }
+                    if (this.showMoveUndo) {
+                        clearTimeout(this.moveTimeout);
+                        await this.finalizeMove(false);
+                    }
+
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const hasQuery = urlParams.has('q') && urlParams.get('q').trim() !== '';
+                    const hasPage = urlParams.has('page') && parseInt(urlParams.get('page')) > 1;
+
+                    if (this.currentFolder === folderId && !hasQuery && !hasPage) {
+                        this.closeThread();
+                        this.replyTarget = null;
+                    } else {
+                        window.location.assign(`/?folder=${encodeURIComponent(folderId)}`);
+                    }
+                },
+                openCompose() {
+                    this.showCompose = true;
+                    this.composeTo = '';
+                    this.composeSubj = '';
+                    this.composeBody = this.signature ? '<br><br>' + this.signature.replace(/\n/g, '<br>') : '';
+                    this.composeAttachments = [];
+                    this.contactSuggestions = [];
+                    this.showContactSuggestions = false;
+                    this.showReplyContactSuggestions = false;
+                    setTimeout(() => {
+                        this.updateComposeFileInput();
+                        const editor = document.getElementById('compose-editor');
+                        if(editor) editor.innerHTML = this.composeBody;
+                    }, 0);
+                },
+                handleComposeFiles(files) {
+                    if (!files) return;
+                    for (let i = 0; i < files.length; i++) {
+                        this.composeAttachments.push(files[i]);
+                    }
+                    this.updateComposeFileInput();
+                },
+                removeComposeFile(index) {
+                    this.composeAttachments.splice(index, 1);
+                    this.updateComposeFileInput();
+                },
+                updateComposeFileInput() {
+                    const dt = new DataTransfer();
+                    this.composeAttachments.forEach(f => dt.items.add(f));
+                    const input = document.getElementById('compose-file-upload');
+                    if(input) input.files = dt.files;
+                },
+                toggleStar(uid, folder) {
+                    const targetFolder = folder || this.currentFolder;
+                    if (this.starredUids.includes(uid)) {
+                        this.starredUids = this.starredUids.filter(u => u !== uid);
+                        fetch(`/api/toggle_star/${uid}?folder=${encodeURIComponent(targetFolder)}&starred=false`);
+                    } else {
+                        this.starredUids.push(uid);
+                        fetch(`/api/toggle_star/${uid}?folder=${encodeURIComponent(targetFolder)}&starred=true`);
+                    }
+                },
+                createFolder() {
+                    this.availableIcons = [];
+                    this.newFolderName = '';
+                    this.selectedIcon = '';
+                    this.showCreateFolder = true;
+                    fetch('/api/available_icons')
+                        .then(res => res.json())
+                        .then(data => this.availableIcons = data)
+                        .catch(() => this.availableIcons = []);
+                },
+                async submitCreateFolder() {
+                    const fd = new FormData();
+                    fd.append('name', this.newFolderName);
+                    if (this.selectedIcon) fd.append('icon', this.selectedIcon);
+                    try {
+                        const res = await fetch('/api/create_folder', { method: 'POST', body: fd });
+                        const text = await res.text();
+                        if (text === 'OK') {
+                            window.location.reload();
+                        } else { alert(this.t.could_not_create_folder + ': ' + text); }
+                    } catch(e) { alert(this.t.an_error_occurred); }
+                },
+                deleteFolder(id) {
+                    if(confirm(this.t.delete_folder_confirm.replace('{}', id))) {
+                        const fd = new FormData();
+                        fd.append('name', id);
+                        fetch('/api/delete_folder', { method: 'POST', body: fd }).then(() => window.location.reload());
+                    }
+                },
+                blockSender() {
+                    if(confirm(this.t.block_sender_confirm.replace('{}', this.contextMenuTarget.from))) {
+                        const fd = new FormData();
+                        fd.append('sender', this.contextMenuTarget.from);
+                        fetch('/api/block_sender', { method: 'POST', body: fd }).then(() => window.location.reload());
+                    }
+                },
+                markAsAd() {
+                    if(confirm(this.t.mark_ad_confirm.replace('{}', this.contextMenuTarget.from))) {
+                        const fd = new FormData();
+                        fd.append('sender', this.contextMenuTarget.from);
+                        fetch('/api/mark_as_ad', { method: 'POST', body: fd }).then(() => window.location.reload());
+                    }
+                },
+                whitelistSender() {
+                    if(confirm(this.t.whitelist_sender_confirm.replace('{}', this.contextMenuTarget.from))) {
+                        const fd = new FormData();
+                        fd.append('sender', this.contextMenuTarget.from);
+                        fetch('/api/whitelist_sender', { method: 'POST', body: fd }).then(() => window.location.reload());
+                    }
+                },
+                toggleAll() {
+                    this.selectedMails = (this.selectedMails.length === this.allUids.length) ? [] : [...this.allUids];
+                },
+                async deleteSelected() {
+                    if(this.selectedMails.length === 0) return;
+                    if (this.selectedMails.length === this.allUids.length && this.allUids.length > 0) {
+                        if(!confirm(this.t.delete_selected_confirm)) return;
+                    }
+                    this.mailsToDelete = [...this.selectedMails];
+                    this.mailsToDelete.forEach(uid => this.deletedUids.push(uid));
+                    this.selectedMails = [];
+                    this.showUndo = true;
+                    if (this.undoTimeout) clearTimeout(this.undoTimeout);
+                    this.undoTimeout = setTimeout(() => this.finalizeDelete(), 5000);
+                },
+                deleteThread(uids) {
+                    const uidsArray = uids.toString().split(',');
+                    this.mailsToDelete = uidsArray;
+                    uidsArray.forEach(uid => this.deletedUids.push(uid));
+                    this.showUndo = true;
+                    if (this.undoTimeout) clearTimeout(this.undoTimeout);
+                    this.undoTimeout = setTimeout(() => this.finalizeDelete(), 5000);
+                },
+                async finalizeDelete(reload = true) {
+                    const fd = new FormData();
+                    fd.append('folder', this.currentFolder);
+                    this.mailsToDelete.forEach(u => fd.append('uids[]', u));
+                    this.showUndo = false;
+                    try { await fetch('/api/delete_mails', { method: 'POST', body: fd }); } catch(e) {}
+                    this.mailsToDelete = [];
+                    if (reload) window.location.reload();
+                },
+                emptyTrash(folder) {
+                    if(confirm(this.t.empty_trash_confirm)) {
+                        const fd = new FormData();
+                        fd.append('folder', folder);
+                        fetch('/api/empty_trash', { method: 'POST', body: fd }).then(() => window.location.reload());
+                    }
+                },
+                openReply(uid, to, subj, base64Body, attachments) {
+                    this.replyTarget = uid;
+                    this.replyTo = to;
+                    this.replySubj = subj;
+                    this.isForward = (to === '');
+                    this.attachments = [];
+                    this.forwardAttachments = attachments || [];
+                    this.showReplyContactSuggestions = false;
+                    try {
+                        let decoded = decodeURIComponent(escape(atob(base64Body)));
+                        let sig = this.signature ? '<br><br>' + this.signature.replace(/\n/g, '<br>') : '';
+                        if (this.isForward) {
+                            this.replyBody = sig + '<br><br>' + this.t.forwarded_message + '<br>' + decoded;
+                        } else {
+                            this.replyBody = sig + '<br><br>--- ' + to + ' ' + this.t.wrote + ' ---<br><blockquote style="border-left: 2px solid #ccc; padding-left: 10px; margin-left: 5px;">' + decoded + '</blockquote>';
+                        }
+                    } catch(e) { this.replyBody = ''; }
+                    
+                    setTimeout(() => {
+                        const editor = document.getElementById('reply-editor');
+                        if(editor) editor.innerHTML = this.replyBody;
+                        if(editor) { editor.focus(); }
+                        this.updateFileInput();
+                    }, 0);
+                },
+                handleFiles(files) {
+                    if (!files) return;
+                    for (let i = 0; i < files.length; i++) {
+                        this.attachments.push(files[i]);
+                    }
+                    this.updateFileInput();
+                },
+                removeFile(index) {
+                    this.attachments.splice(index, 1);
+                    this.updateFileInput();
+                },
+                updateFileInput() {
+                    const dt = new DataTransfer();
+                    this.attachments.forEach(f => dt.items.add(f));
+                    const input = document.getElementById('file-upload');
+                    if(input) input.files = dt.files;
+                },
+                contextMenuOpen: false,
+                contextMenuX: 0,
+                contextMenuY: 0,
+                contextMenuTarget: {},
+                openContextMenu(e, tid, uids, from, subject, body, unread, attachments) {
+                    this.contextMenuTarget = { tid, uids, from, subject, body, unread, attachments };
+                    this.contextMenuX = e.clientX;
+                    this.contextMenuY = e.clientY;
+                    this.contextMenuOpen = true;
+                    
+                    this.$nextTick(() => {
+                        const el = document.getElementById('context-menu');
+                        if (el) {
+                            const h = el.offsetHeight;
+                            const w = el.offsetWidth;
+                            if (this.contextMenuY + h > window.innerHeight) this.contextMenuY -= h;
+                            if (this.contextMenuX + w > window.innerWidth) this.contextMenuX -= w;
+                        }
+                    });
+                },
+                async toggleReadStatus() {
+                    const action = this.contextMenuTarget.unread ? 'mark_read' : 'mark_unread';
+                    await fetch(`/api/${action}/${this.contextMenuTarget.uids}?folder=${encodeURIComponent(this.currentFolder)}`);
+                    window.location.reload();
+                },
+                moveMail(dest, uids = null) {
+                    let targetUids = uids;
+                    if (targetUids === null) targetUids = this.contextMenuTarget.uids;
+                    
+                    if (!targetUids || targetUids === 'undefined') return;
+                    
+                    if (this.showMoveUndo) {
+                        clearTimeout(this.moveTimeout);
+                        this.finalizeMove(false);
+                    }
+
+                    const uidsArray = targetUids.split(',');
+                    this.mailsToMove = uidsArray;
+                    this.moveDestination = dest;
+                    
+                    uidsArray.forEach(uid => this.deletedUids.push(uid));
+                    
+                    this.showMoveUndo = true;
+                    if (this.moveTimeout) clearTimeout(this.moveTimeout);
+                    this.moveTimeout = setTimeout(() => this.finalizeMove(), 5000);
+                },
+                async finalizeMove(reload = true) {
+                    const fd = new FormData();
+                    fd.append('folder', this.currentFolder);
+                    fd.append('uids', this.mailsToMove.join(','));
+                    fd.append('dest', this.moveDestination);
+                    this.showMoveUndo = false;
+                    try { await fetch('/api/move_mail', { method: 'POST', body: fd }); } catch(e) {}
+                    this.mailsToMove = [];
+                    if (reload) window.location.reload();
+                },
+                undoMove() {
+                    clearTimeout(this.moveTimeout);
+                    this.showMoveUndo = false;
+                    this.deletedUids = this.deletedUids.filter(uid => !this.mailsToMove.includes(uid));
+                    this.mailsToMove = [];
+                },
+                async saveDraft() {
+                    if (this.isSavingDraft) return;
+                    const emptySig = this.signature ? '<br><br>' + this.signature.replace(/\n/g, '<br>') : '';
+                    if (!this.composeTo && !this.composeSubj && (!this.composeBody || this.composeBody === emptySig)) return;
+                    this.isSavingDraft = true;
+                    const fd = new FormData();
+                    fd.append('to', this.composeTo);
+                    fd.append('subject', this.composeSubj);
+                    fd.append('body', this.composeBody);
+                    this.composeAttachments.forEach(f => fd.append('files', f));
+                    try { await fetch('/api/save_draft', { method: 'POST', body: fd, keepalive: true }); } catch(e) {}
+                    this.isSavingDraft = false;
+                },
+                async sendAjax(e, isReply) {
+                    this.isSending = true;
+                    this.uploadProgress = 0;
+                    const fd = new FormData(e.target);
+                    
+                    // Fix Issue 2: Manually append files to ensure they are sent
+                    fd.delete('files'); 
+                    
+                    // Hämta HTML från editorn
+                    const editorId = isReply ? 'reply-editor' : 'compose-editor';
+                    const editor = document.getElementById(editorId);
+                    if (editor) fd.set('body', editor.innerHTML);
+
+                    const atts = isReply ? this.attachments : this.composeAttachments;
+                    atts.forEach(f => fd.append('files', f));
+
+                    try {
+                        await new Promise((resolve, reject) => {
+                            const xhr = new XMLHttpRequest();
+                            xhr.open('POST', '/send');
+                            
+                            xhr.upload.addEventListener('progress', (e) => {
+                                if (e.lengthComputable) {
+                                    this.uploadProgress = Math.round((e.loaded * 100) / e.total);
+                                }
+                            });
+                            
+                            xhr.onload = () => (xhr.status >= 200 && xhr.status < 300) ? resolve(xhr.responseText) : reject(xhr.statusText);
+                            xhr.onerror = () => reject('Network Error');
+                            xhr.send(fd);
+                        });
+
+                        if (isReply) {
+                            this.replyTarget = null;
+                            this.replyBody = '';
+                            this.attachments = [];
+                            this.forwardAttachments = [];
+                        } else {
+                            this.composeTo = '';
+                            this.composeSubj = '';
+                            this.composeBody = '';
+                            this.composeAttachments = [];
+                            this.showCompose = false;
+                        }
+                    } catch(err) { alert(this.t.could_not_send); }
+                    this.isSending = false;
+                    this.uploadProgress = 0;
+                }
+            }));
+
+            Alpine.data('searchComponent', () => ({
+                query: window.ZalasoConfig.query,
+                suggestions: [],
+                showSuggestions: false,
+                isLoading: false,
+                searchTimeout: null,
+                init() {
+                    this.isLoading = false;
+                    this.showSuggestions = false;
+                    this.suggestions = [];
+                },
+                onInput() {
+                    if (document.activeElement !== this.$refs.searchInput) return;
+                    if (this.query.length < 2) {
+                        this.isLoading = false;
+                        this.showSuggestions = false;
+                        return;
+                    }
+                    this.isLoading = true;
+                    if (this.searchTimeout) clearTimeout(this.searchTimeout);
+                    this.searchTimeout = setTimeout(() => this.fetchSuggestions(), 300);
+                },
+                async fetchSuggestions() {
+                    if (document.activeElement !== this.$refs.searchInput) { this.isLoading = false; return; }
+                    if (this.query.length < 2) { this.suggestions = []; this.showSuggestions = false; this.isLoading = false; return; }
+                    this.isLoading = true;
+                    try {
+                        const res = await fetch(`/api/search_suggestions?q=${encodeURIComponent(this.query)}&folder=${encodeURIComponent(window.ZalasoConfig.currentFolder)}`);
+                        if (document.activeElement !== this.$refs.searchInput) { this.isLoading = false; return; }
+                        this.suggestions = await res.json();
+                        this.showSuggestions = true;
+                    } catch(e) { this.suggestions = []; }
+                    this.isLoading = false;
+                },
+                submitSearch() {
+                    this.$refs.form.submit();
+                }
+            }));
+        });
+    </script>
+</head>
+<body x-data="mailApp" class="flex h-screen text-gray-700">
+
+    <!-- Undo Toast -->
+    <div x-show="showUndo" class="fixed bottom-6 left-6 bg-gray-900 text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-4 z-[80]" x-transition.duration.300ms x-cloak>
+        <span x-text="t.undo_delete"></span>
+        <button @click="clearTimeout(undoTimeout); showUndo = false; deletedUids = deletedUids.filter(uid => !mailsToDelete.includes(uid)); mailsToDelete = []" class="text-blue-300 font-bold hover:text-blue-200 uppercase text-sm tracking-wide" x-text="t.undo"></button>
+    </div>
+
+    <!-- Move Undo Toast -->
+    <div x-show="showMoveUndo" class="fixed bottom-6 left-6 bg-gray-900 text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-4 z-[80]" x-transition.duration.300ms x-cloak>
+        <span x-text="t.undo_move"></span>
+        <button @click="undoMove()" class="text-blue-300 font-bold hover:text-blue-200 uppercase text-sm tracking-wide" x-text="t.undo"></button>
+    </div>
+
+    <div class="w-64 flex-shrink-0 flex flex-col p-4 bg-[#f6f8fc]">
+        <div class="flex items-center mb-6 px-4 cursor-pointer" @click="activeThread = null; replyTarget = null">
+            <img src="{{ url_for('static', filename='zalaso.png') }}" alt="Zalaso" class="h-24 w-auto object-contain">
+        </div>
+        <button @click="openCompose()" class="mb-6 mx-2 flex items-center justify-center h-14 bg-[#c2e7ff] hover:shadow-md transition rounded-2xl text-[#001d35] font-bold gap-3 shadow-sm">
+            <img src="{{ url_for('static', filename='ikoner/write.png') }}" class="w-6 h-6 object-contain"> <span class="pr-2" x-text="t.compose"></span>
+        </button>
+        <div class="flex items-center justify-between px-4 mt-2 mb-2">
+            <span class="text-xs font-bold text-gray-500 uppercase flex items-center gap-2">
+                <span x-text="t.folders"></span>
+                <button @click="fetch('/api/sync_folders', {method: 'POST'}).then(() => setTimeout(() => window.location.reload(), 1000))" class="text-gray-400 hover:text-blue-600 transition" :title="t.update">↻</button>
+            </span>
+            <button @click="createFolder()" class="text-gray-500 hover:bg-gray-200 rounded-full w-6 h-6 flex items-center justify-center transition text-lg" :title="t.new_folder">+</button>
+        </div>
+        <nav class="flex-1 space-y-1 overflow-y-auto">
+            {% for f in folders if f.is_system %}
+            <a href="/?folder={{ f.id }}" 
+               @click.prevent="goToFolder('{{ f.id }}')" 
+               @dragover.prevent="$el.classList.add('bg-blue-100'); $event.dataTransfer.dropEffect = 'move'" 
+               @dragleave="$el.classList.remove('bg-blue-100')" 
+               @drop.prevent="$el.classList.remove('bg-blue-100'); moveMail('{{ f.id }}', $event.dataTransfer.getData('text/plain'))"
+               class="group flex items-center px-6 py-3 rounded-r-full -ml-4 {{ 'bg-[#d3e3fd] text-blue-900 font-bold' if current_folder == f.id else 'text-gray-700 hover:bg-gray-200 hover:shadow-sm border border-transparent hover:border-gray-300' }}">
+                {% if f.is_image %}
+                <img src="{{ url_for('static', filename='ikoner/' + f.icon) }}" class="w-6 h-6 mr-3 object-contain">
+                {% else %}
+                <span class="mr-3 text-lg">{{ f.icon }}</span>
+                {% endif %}
+                <span class="truncate text-sm flex-1">{{ f.name }}</span>
+            </a>
+            {% endfor %}
+
+            {% for f in folders if not f.is_system %}
+            {% if loop.first %}<div class="pt-4 pb-2 px-4 text-xs font-bold text-gray-500 uppercase" x-text="t.my_folders"></div>{% endif %}
+            <a href="/?folder={{ f.id }}" 
+               @click.prevent="goToFolder('{{ f.id }}')" 
+               @dragover.prevent="$el.classList.add('bg-blue-100'); $event.dataTransfer.dropEffect = 'move'" 
+               @dragleave="$el.classList.remove('bg-blue-100')" 
+               @drop.prevent="$el.classList.remove('bg-blue-100'); moveMail('{{ f.id }}', $event.dataTransfer.getData('text/plain'))"
+               class="group flex items-center px-6 py-3 rounded-r-full -ml-4 {{ 'bg-[#d3e3fd] text-blue-900 font-bold' if current_folder == f.id else 'text-gray-700 hover:bg-gray-200 hover:shadow-sm border border-transparent hover:border-gray-300' }}">
+                {% if f.is_image %}<img src="{{ url_for('static', filename='ikoner/' + f.icon) }}" class="w-6 h-6 mr-3 object-contain">{% else %}<span class="mr-3 text-lg">{{ f.icon }}</span>{% endif %}
+                <span class="truncate text-sm flex-1">{{ f.name }}</span>
+                <button @click.stop.prevent="deleteFolder('{{ f.id }}')" class="p-1 hover:bg-red-100 rounded-full text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition" title="Radera mapp">🗑️</button>
+            </a>
+            {% endfor %}
+        </nav>
+        <div class="mt-4 pt-4 border-t border-gray-200">
+            <button @click="showSettings = true" class="flex items-center px-4 py-2 text-gray-600 hover:bg-gray-200 rounded-lg w-full transition">
+                <img src="{{ url_for('static', filename='ikoner/settings.png') }}" class="w-5 h-5 mr-3 object-contain"> <span x-text="t.settings"></span>
+            </button>
+            <a href="/logout" class="flex items-center px-4 py-2 text-gray-600 hover:bg-gray-200 rounded-lg w-full transition mt-1">
+                <img src="{{ url_for('static', filename='ikoner/logout.png') }}" class="w-5 h-5 mr-3 object-contain"> <span x-text="t.logout"></span>
+            </a>
+        </div>
+    </div>
+
+    <div class="flex-1 bg-white overflow-hidden flex flex-col relative border-l border-gray-200">
+
+        <div x-show="activeThread === null" class="flex flex-col h-full">
+            <div class="h-16 flex items-center px-6 border-b border-gray-100 justify-between gap-4">
+                <!-- Select All -->
+                <div class="flex-shrink-0 flex items-center">
+                    <input type="checkbox" @click="toggleAll()" :checked="allUids.length > 0 && selectedMails.length === allUids.length" :indeterminate.prop="selectedMails.length > 0 && selectedMails.length < allUids.length" class="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer">
+                </div>
+
+                <!-- Delete Toolbar -->
+                <div x-show="selectedMails.length > 0" class="flex items-center gap-4 flex-1" x-cloak>
+                    <button @click="deleteSelected()" class="p-2 hover:bg-red-50 text-gray-600 hover:text-red-600 rounded-full transition" :title="t.delete">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                    </button>
+                    <span class="font-medium text-gray-700" x-text="selectedMails.length + ' ' + t.selected"></span>
+                    <button @click="selectedMails = []" class="text-sm text-blue-600 font-medium hover:underline" x-text="t.cancel"></button>
+                </div>
+
+                {% if is_trash %}
+                <div x-show="selectedMails.length === 0" class="mr-4">
+                    <button @click="emptyTrash('{{ current_folder }}')" class="text-red-600 hover:bg-red-50 px-3 py-1.5 rounded-lg text-sm font-bold transition flex items-center gap-2 whitespace-nowrap">
+                        <span>🗑️</span> <span x-text="t.empty_trash"></span>
+                    </button>
+                </div>
+                {% endif %}
+
+                <div x-show="selectedMails.length === 0" x-data="searchComponent" class="w-full max-w-2xl relative z-50">
+                    <form x-ref="form" action="/" method="GET" class="w-full relative">
+                        <input type="hidden" name="folder" value="{{ current_folder }}">
+                        <div class="absolute left-4 top-0 h-full flex items-center pointer-events-none text-gray-500">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                        </div>
+                        <div x-show="isLoading" class="absolute right-4 top-0 h-full flex items-center pointer-events-none text-blue-500" x-transition x-cloak>
+                            <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        </div>
+                        <input type="text" name="q" x-ref="searchInput" x-model="query" @input="onInput()" @keydown.escape="showSuggestions = false" @click.outside="showSuggestions = false" @focus="if(query.length >= 2) onInput()" autocomplete="off" :placeholder="t.search_placeholder" class="bg-[#eaf1fb] h-11 w-full rounded-full pl-12 pr-4 text-gray-700 text-sm outline-none focus:bg-white focus:shadow-md transition placeholder-gray-500">
+                    </form>
+                    
+                    <div x-show="showSuggestions && (suggestions.length > 0 || !isLoading)" class="absolute top-full left-0 right-0 bg-white rounded-b-2xl shadow-xl border border-t-0 border-gray-100 mt-1 overflow-hidden z-[100]" style="border-radius: 0 0 24px 24px;" x-transition x-cloak>
+                        <template x-for="s in suggestions">
+                            <div @click="query = s.subject; submitSearch()" class="px-4 py-3 hover:bg-gray-100 cursor-pointer flex items-center gap-3 border-b border-gray-50 last:border-0">
+                                <div class="text-gray-400"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg></div>
+                                <div class="flex-1 min-w-0"><div class="text-sm font-medium text-gray-900 truncate" x-text="s.subject"></div><div class="text-xs text-gray-500 truncate" x-text="s.from"></div></div>
+                                <div class="text-xs text-gray-400" x-text="s.date"></div>
+                            </div>
+                        </template>
+                        <div x-show="suggestions.length === 0 && !isLoading" class="px-4 py-3 text-sm text-gray-500 italic text-center" x-text="t.no_results">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Pagination -->
+                <div class="flex-shrink-0 flex items-center gap-2">
+                    <button onclick="window.location.reload()" class="p-2 text-gray-500 hover:bg-gray-100 rounded-full transition" :title="t.update">↻</button>
+                    {{ pagination_html | safe }}
+                </div>
+            </div>
+            
+            {% if error %}
+            <div class="bg-red-50 border-l-4 border-red-500 p-4 m-4">
+                <p class="font-bold text-red-700">{{ t['error'] }}</p>
+                <p class="text-sm text-red-600">{{ error }}</p>
+            </div>
+            {% endif %}
+
+            <div class="flex-1 overflow-y-auto">
+                {% for id, data in threads.items() %}
+                {% set thread_uids = data['msgs'] | map(attribute='uid') | join(',') %}
+                {% set msg_count = data['msgs'] | length %}
+                {% set is_forward = 'vb:' in data['subject'].lower() or 'fwd:' in data['subject'].lower() %}
+                <div x-data="{ unread: {{ 'true' if data['unread'] else 'false' }} }" 
+                     @click="openThread('{{ id }}'); if(unread){ fetch('/api/mark_read/{{ thread_uids }}?folder=' + encodeURIComponent('{{ current_folder }}')); unread = false; }" 
+                     data-ctx="{{ {'id': id, 'uids': thread_uids, 'from': data['msgs'][0]['from'], 'subject': data['subject'], 'attachments': data['msgs'][0]['attachments']} | tojson | forceescape | safe }}"
+                     @contextmenu.prevent="openCtxMenu($event, $el.dataset.ctx, unread)"
+                     draggable="true" @dragstart="$event.dataTransfer.setData('text/plain', '{{ thread_uids }}'); $event.dataTransfer.effectAllowed = 'move';"
+                     class="group flex items-center {{ 'p-1.5' if settings.get('layout') == 'compact' else 'p-3.5' }} border border-transparent border-b-gray-300 cursor-pointer hover:bg-white hover:shadow-md hover:z-10 relative transition hover:border-blue-500 hover:ring-1 hover:ring-blue-500"
+                     :class="unread ? 'bg-white font-bold text-gray-900' : 'bg-gray-100 font-normal text-gray-600'"
+                     x-show="!deletedUids.includes('{{ data['msgs'][0]['uid'] }}')">
+                    <button @click.stop="toggleStar('{{ data['msgs'][0]['uid'] }}', '{{ data['msgs'][0]['folder'] }}')" class="mr-3 focus:outline-none transition transform hover:scale-110">
+                        <span class="text-xl leading-none" :class="starredUids.includes('{{ data['msgs'][0]['uid'] }}') ? 'text-yellow-400' : 'text-gray-300'">★</span>
+                    </button>
+                    <div class="pr-4 flex items-center" @click.stop>
+                        <input type="checkbox" value="{{ data['msgs'][0]['uid'] }}" x-model="selectedMails" class="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer">
+                    </div>
+                    <div class="w-56 truncate pr-4 text-sm">{{ data['msgs'][0]['from'] }}</div>
+                    <div class="flex-1 min-w-0 text-sm flex items-center pr-2">
+                        {% if is_forward %}
+                        <span class="mr-2 text-gray-500 bg-gray-100 px-1.5 rounded text-xs font-medium border border-gray-200 flex-shrink-0">Vb</span>
+                        {% endif %}
+                        {% for l_id in data['labels'] %}
+                            {% if l_id in labels_map %}
+                            <span class="mr-2 px-2 py-0.5 rounded text-[10px] font-bold text-white flex-shrink-0" style="background-color: {{ labels_map[l_id]['color'] }}">{{ labels_map[l_id]['name'] }}</span>
+                            {% endif %}
+                        {% endfor %}
+                        <span class="truncate text-gray-700">{{ data['subject'] }}</span>
+                        
+                        {% if data['thread_attachments'] %}
+                        <div class="flex items-center gap-2 ml-3 flex-shrink-0">
+                            {% for att in data['thread_attachments'][:3] %}
+                                {% set ext = att['filename'].split('.')[-1].lower() if '.' in att['filename'] else '' %}
+                                {% set is_pdf = ext == 'pdf' %}
+                                {% set is_word = ext in ['doc', 'docx', 'odt', 'rtf'] %}
+                                {% set is_excel = ext in ['xls', 'xlsx', 'csv', 'ods'] %}
+                                {% set is_ppt = ext in ['ppt', 'pptx', 'odp'] %}
+                                {% set is_archive = ext in ['zip', 'rar', '7z', 'tar', 'gz'] %}
+                                <a href="{{ url_for('download_attachment', uid=att['uid'], filename=att['filename'], folder=att['folder'], disposition='inline') }}" 
+                                   target="_blank"
+                                   @click.stop
+                                   class="flex items-center gap-1 px-2 py-0.5 bg-white border border-gray-200 rounded-full text-xs text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition no-underline shadow-sm"
+                                   title="{{ att['filename'] }}">
+                                    {% if is_pdf %} <svg class="w-3.5 h-3.5 text-red-500" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg>
+                                    {% elif is_word %} <svg class="w-3.5 h-3.5 text-blue-600" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg>
+                                    {% elif is_excel %} <svg class="w-3.5 h-3.5 text-green-600" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg>
+                                    {% elif is_ppt %} <svg class="w-3.5 h-3.5 text-orange-500" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg>
+                                    {% elif is_archive %} <svg class="w-3.5 h-3.5 text-yellow-600" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg>
+                                    {% else %} <svg class="w-3.5 h-3.5 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg> {% endif %}
+                                    <span class="max-w-[80px] truncate">{{ att['filename'] }}</span>
+                                </a>
+                            {% endfor %}
+                            {% if data['thread_attachments']|length > 3 %}
+                                <span class="text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full border border-gray-200">+{{ data['thread_attachments']|length - 3 }}</span>
+                            {% endif %}
+                        </div>
+                        {% endif %}
+
+                        {% if msg_count > 1 %}
+                        <span class="ml-2 bg-blue-100 text-blue-800 text-xs font-bold px-2 py-0.5 rounded-full flex-shrink-0">{{ msg_count }}</span>
+                        {% endif %}
+                    </div>
+                    <div class="w-32 text-right text-xs relative">
+                        <span class="group-hover:hidden">{{ data['msgs'][0]['date'] }}</span>
+                        <div class="hidden group-hover:flex items-center justify-end gap-1 absolute right-0 top-1/2 -translate-y-1/2">
+                            <button @click.stop="trashFolderId && currentFolder !== trashFolderId ? moveMail(trashFolderId, '{{ thread_uids }}') : deleteThread('{{ thread_uids }}')" class="p-2 hover:bg-gray-200 rounded-full text-gray-500 hover:text-red-600 transition" :title="t.delete">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                            </button>
+                            <button @click.stop="unread = !unread; fetch('/api/' + (unread ? 'mark_unread' : 'mark_read') + '/{{ thread_uids }}?folder=' + encodeURIComponent(currentFolder))" class="p-2 hover:bg-gray-200 rounded-full text-gray-500 hover:text-blue-600 transition" :title="unread ? t.mark_read : t.mark_unread">
+                                <svg x-show="unread" x-cloak xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 19v-8.93a2 2 0 01.89-1.664l7.11-4.83a2 2 0 012.22 0l7.11 4.83a2 2 0 01.89 1.664V19a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
+                                <svg x-show="!unread" x-cloak xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+                            </button>
+                            <button data-msg="{{ {'tid': id, 'uid': data['msgs'][0]['uid'], 'from': data['msgs'][0]['from'], 'subject': data['subject'], 'attachments': data['msgs'][0]['attachments']} | tojson | forceescape | safe }}" @click.stop="replyToMsg($el.dataset.msg)" class="p-2 hover:bg-gray-200 rounded-full text-gray-500 hover:text-green-600 transition" :title="t.reply">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
+                            </button>
+                            <button data-msg="{{ {'tid': id, 'uid': data['msgs'][0]['uid'], 'subject': data['subject'], 'attachments': data['msgs'][0]['attachments']} | tojson | forceescape | safe }}" @click.stop="forwardMsg($el.dataset.msg)" class="p-2 hover:bg-gray-200 rounded-full text-gray-500 hover:text-blue-600 transition" :title="t.forward">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 10h-10a8 8 0 00-8 8v2M21 10l-6 6m6-6l-6-6" /></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div x-show="activeThread !== null" class="absolute inset-0 bg-white z-10 flex flex-col" x-cloak>
+            <div class="p-4 border-b border-gray-100 flex items-center gap-4 bg-white sticky top-0 shadow-sm z-30">
+                <button @click="closeThread(); replyTarget = null" class="p-2 hover:bg-gray-100 rounded-full text-blue-600 font-bold transition">← <span x-text="t.inbox"></span></button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto bg-[#f8f9fa]">
+                {% for id, data in threads.items() %}
+                <template x-if="activeThread === '{{ id }}'">
+                <div class="w-full pb-24">
+                    <div class="p-6 border-b border-gray-300 bg-white">
+                        <h2 class="text-xl font-medium text-gray-800">{{ data['subject'] }}</h2>
+                        {% if data['msgs']|length > 1 %}
+                        <div class="text-sm text-gray-500 mt-2 flex items-center gap-2">
+                            <span class="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-0.5 rounded-full">{{ data['msgs']|length }}</span>
+                            <span x-text="t.msgs_in_thread"></span>
+                        </div>
+                        {% endif %}
+                    </div>
+
+                    {% for msg in data['msgs']|reverse %}
+                    <div class="mb-6 mx-4 mt-6 bg-white border border-gray-300 rounded-xl shadow-sm overflow-hidden" @click.stop>
+                        <div class="flex justify-between px-6 py-4 text-sm font-bold bg-gray-50 border-b border-gray-300">
+                            <div class="flex items-center gap-3">
+                                <div class="w-8 h-8 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs font-bold">{{ msg['from'][0]|upper }}</div>
+                                <span>{{ msg['from_full'] }}</span>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <span class="font-normal text-gray-400 text-xs">{{ msg['date'] }}</span>
+                                <button @click.stop="document.getElementById('iframe-{{ msg['uid'] }}').contentWindow.print()" class="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600 transition" :title="t.print"><img src="{{ url_for('static', filename='ikoner/printer.png') }}" class="w-6 h-6 object-contain"></button>
+                                <button data-msg="{{ {'tid': id, 'uid': msg['uid'], 'subject': data['subject'], 'attachments': msg['attachments']} | tojson | forceescape | safe }}" @click.stop="forwardMsg($el.dataset.msg)" class="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600 transition" :title="t.forward">➔</button>
+                            </div>
+                        </div>
+
+                        <div class="px-6 py-4">
+                            <iframe
+                                id="iframe-{{ msg['uid'] }}"
+                                class="mail-frame"
+                                onload="window.Zalaso.resizeIframe(this)"
+                                sandbox="allow-popups allow-same-origin allow-modals"
+                                srcdoc="<html><head><style>body{font-family:sans-serif;margin:0;padding:25px;line-height:1.6;color:#1f1f1f;background:#fff;overflow-wrap:break-word;word-wrap:break-word;}pre{white-space:pre-wrap;word-wrap:break-word;}img{max-width:100% !important;height:auto !important;border-radius:12px;}</style></head><body>{{ msg['body_html']|replace('\"', '&quot;')|safe }}</body></html>">
+                            </iframe>
+                        </div>
+
+                        {% if msg['attachments'] %}
+                        <div class="px-6 pb-6 flex flex-wrap gap-3">
+                            {% for att in msg['attachments'] %}
+                            {% set ext = att['filename'].split('.')[-1].lower() if '.' in att['filename'] else '' %}
+                            {% set ctype = att.get('content_type', '') %}
+                            {% set is_image = ctype.startswith('image/') %}
+                            {% set is_pdf = ctype == 'application/pdf' or ext == 'pdf' %}
+                            {% set is_word = ext in ['doc', 'docx', 'odt', 'rtf'] %}
+                            {% set is_excel = ext in ['xls', 'xlsx', 'csv', 'ods'] %}
+                            {% set is_ppt = ext in ['ppt', 'pptx', 'odp'] %}
+                            {% set is_archive = ext in ['zip', 'rar', '7z', 'tar', 'gz'] %}
+                            {% set can_preview_word = ext == 'docx' %}
+                            
+                            <div class="group relative w-48 h-36 bg-gray-50 border border-gray-200 rounded-xl overflow-hidden hover:shadow-md transition flex flex-col">
+                                {% if is_excel %}
+                                <div @click="previewDoc('{{ url_for('download_attachment', uid=msg['uid'], filename=att['filename'], folder=msg['folder']) }}', '{{ att['filename'] }}', 'excel')" class="flex-1 flex items-center justify-center bg-gray-100 overflow-hidden relative cursor-pointer">
+                                {% elif can_preview_word %}
+                                <div @click="previewDoc('{{ url_for('download_attachment', uid=msg['uid'], filename=att['filename'], folder=msg['folder']) }}', '{{ att['filename'] }}', 'word')" class="flex-1 flex items-center justify-center bg-gray-100 overflow-hidden relative cursor-pointer">
+                                {% else %}
+                                <a href="{{ url_for('download_attachment', uid=msg['uid'], filename=att['filename'], folder=msg['folder'], disposition='inline') }}" target="_blank" class="flex-1 flex items-center justify-center bg-gray-100 overflow-hidden relative no-underline">
+                                {% endif %}
+                                    {% if is_image %}
+                                        <img src="{{ url_for('download_attachment', uid=msg['uid'], filename=att['filename'], folder=msg['folder'], disposition='inline') }}" class="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition">
+                                    {% elif is_pdf %}
+                                        <div class="flex flex-col items-center text-red-500">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
+                                            <span class="text-[10px] font-bold mt-1 uppercase">PDF</span>
+                                        </div>
+                                    {% elif is_word %}
+                                        <div class="flex flex-col items-center text-blue-600">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                            <span class="text-[10px] font-bold mt-1 uppercase">{{ ext }}</span>
+                                        </div>
+                                    {% elif is_excel %}
+                                        <div class="flex flex-col items-center text-green-600">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                            <span class="text-[10px] font-bold mt-1 uppercase">{{ ext }}</span>
+                                        </div>
+                                    {% elif is_ppt %}
+                                        <div class="flex flex-col items-center text-orange-500">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                            <span class="text-[10px] font-bold mt-1 uppercase">{{ ext }}</span>
+                                        </div>
+                                    {% elif is_archive %}
+                                        <div class="flex flex-col items-center text-yellow-600">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                            <span class="text-[10px] font-bold mt-1 uppercase">{{ ext }}</span>
+                                        </div>
+                                    {% else %}
+                                        <div class="flex flex-col items-center text-gray-400">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                            <span class="text-[10px] font-bold mt-1 uppercase">{{ ext }}</span>
+                                        </div>
+                                    {% endif %}
+                                    <div class="absolute inset-0 bg-black/0 group-hover:bg-black/5 transition"></div>
+                                {% if is_excel or can_preview_word %}</div>{% else %}</a>{% endif %}
+                                <div class="h-10 bg-white border-t border-gray-100 flex items-center justify-between px-3">
+                                    <div class="flex items-center gap-2 overflow-hidden flex-1">
+                                        {% if is_pdf %}<div class="bg-red-100 p-1 rounded"><svg class="w-3 h-3 text-red-600" fill="currentColor" viewBox="0 0 20 20"><path d="M9 2a2 2 0 00-2 2v8a2 2 0 002 2h6a2 2 0 002-2V6.414A2 2 0 0016.414 5L14 2.586A2 2 0 0012.586 2H9z" /></svg></div>
+                                        {% elif is_image %}<div class="bg-blue-100 p-1 rounded"><svg class="w-3 h-3 text-blue-600" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd" /></svg></div>
+                                        {% elif is_word %}<div class="bg-blue-100 p-1 rounded"><svg class="w-3 h-3 text-blue-600" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg></div>
+                                        {% elif is_excel %}<div class="bg-green-100 p-1 rounded"><svg class="w-3 h-3 text-green-600" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg></div>
+                                        {% elif is_ppt %}<div class="bg-orange-100 p-1 rounded"><svg class="w-3 h-3 text-orange-500" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg></div>
+                                        {% elif is_archive %}<div class="bg-yellow-100 p-1 rounded"><svg class="w-3 h-3 text-yellow-600" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg></div>
+                                        {% else %}<div class="bg-gray-100 p-1 rounded"><svg class="w-3 h-3 text-gray-600" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0111.293 2.707l4.414 4.414A2 2 0 0116 7.586V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd" /></svg></div>{% endif %}
+                                        <span class="text-xs text-gray-700 truncate font-medium flex-1" title="{{ att['filename'] }}">{{ att['filename'] }}</span>
+                                    </div>
+                                    <a href="{{ url_for('download_attachment', uid=msg['uid'], filename=att['filename'], folder=msg['folder']) }}" class="text-gray-400 hover:text-blue-600 p-1.5 rounded-full hover:bg-gray-100 transition flex-shrink-0" title="Ladda ner">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                    </a>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                </template>
+                {% endfor %}
+            </div>
+
+            {% for id, data in threads.items() %}
+            <template x-if="activeThread === '{{ id }}'">
+            <div class="absolute bottom-0 left-0 right-0 z-20 pointer-events-none">
+                <div x-show="!replyTarget" class="p-6 flex justify-end pointer-events-auto">
+                    <button data-msg="{{ {'tid': id, 'uid': data['msgs'][0]['uid'], 'from': data['msgs'][0]['from'], 'subject': data['subject'], 'attachments': data['msgs'][0]['attachments']} | tojson | forceescape | safe }}" @click="replyToMsg($el.dataset.msg)" 
+                            class="px-8 py-3 bg-[#0b57d0] text-white rounded-full font-bold hover:bg-[#0842a0] transition shadow-xl flex items-center gap-2">
+                        <span class="text-xl">↩</span> <span x-text="t.reply"></span>
+                    </button>
+                </div>
+                
+                <div x-show="replyTarget" class="flex flex-col bg-white border-t border-gray-300 shadow-[0_-4px_20px_rgba(0,0,0,0.15)] pointer-events-auto" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 translate-y-10" x-transition:enter-end="opacity-100 translate-y-0">
+                    <div class="bg-gray-50 px-4 py-2 border-b border-gray-300 text-xs font-bold text-gray-500 flex justify-between items-center">
+                        <span x-show="!isForward"><span x-text="t.reply_to"></span> <span class="text-gray-800" x-text="replyTo"></span></span>
+                        <span x-show="isForward" x-text="t.forwarding"></span>
+                        <button @click="replyTarget = null" class="p-2 hover:bg-gray-200 rounded-full transition">✕</button>
+                    </div>
+                    <form action="/send" method="POST" enctype="multipart/form-data" class="flex flex-col p-4" @dragover.prevent @drop.prevent="handleFiles($event.dataTransfer.files)" @submit.prevent="if(!replyTo){ alert(t.fill_imap); return; } sendAjax($event, true)">
+                        <div x-show="isForward" class="flex items-center mb-4 relative">
+                            <span class="text-gray-700 text-sm font-bold mr-2 w-10" x-text="t.to + ':'"></span>
+                            <input type="text" x-model="replyTo" @input="onReplyContactInput()" @click.outside="showReplyContactSuggestions = false" class="flex-1 p-2 bg-gray-50 border border-gray-400 rounded-md text-sm text-gray-800 focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition" :placeholder="t.to" autocomplete="off">
+                            <div x-show="showReplyContactSuggestions" class="absolute top-full left-0 right-0 bg-white shadow-lg border border-gray-200 z-[100] max-h-48 overflow-y-auto rounded-b-lg" x-transition>
+                                <template x-for="s in replyContactSuggestions">
+                                    <div @click="replyTo = s; showReplyContactSuggestions = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer text-sm text-gray-700" x-text="s"></div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <input type="hidden" name="to" :value="replyTo">
+                        <input type="hidden" name="subject" :value="replySubj">
+                        
+                        <!-- Forwarded attachments list -->
+                        <div class="px-4 flex flex-wrap gap-2 pb-2 max-h-32 overflow-y-auto" x-show="isForward && forwardAttachments.length > 0">
+                            <template x-for="(file, index) in forwardAttachments" :key="'fw-' + index">
+                                <div class="flex items-center bg-blue-50 px-3 py-1 rounded-full text-xs font-medium text-blue-700 border border-blue-200">
+                                    <span x-text="file.filename" class="max-w-[200px] truncate mr-2"></span>
+                                    <button type="button" @click="forwardAttachments.splice(index, 1)" class="text-blue-400 hover:text-red-500 font-bold">✕</button>
+                                    <input type="hidden" name="forward_files" :value="file.filename">
+                                </div>
+                            </template>
+                        </div>
+                        <input type="hidden" name="forward_uid" :value="isForward ? replyTarget : ''">
+                        <input type="hidden" name="folder" value="{{ current_folder }}">
+
+                        <div class="flex flex-wrap gap-2 mb-2 max-h-32 overflow-y-auto" x-show="attachments.length > 0">
+                            <template x-for="(file, index) in attachments" :key="index">
+                                <div class="flex items-center bg-gray-100 px-3 py-1 rounded-full text-xs font-medium text-gray-700 border border-gray-200">
+                                    <span x-text="file.name" class="max-w-[200px] truncate mr-2"></span>
+                                    <button type="button" @click="removeFile(index)" class="text-gray-400 hover:text-red-500 font-bold">✕</button>
+                                </div>
+                            </template>
+                        </div>
+
+                        <!-- HTML Editor -->
+                        <div id="reply-editor" contenteditable="true" class="w-full min-h-[200px] max-h-[500px] overflow-y-auto outline-none text-sm leading-relaxed font-sans mb-4 border border-gray-400 bg-gray-50 focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition p-3 rounded-md" @input="replyBody = $event.target.innerHTML"></div>
+                        <input type="hidden" name="body" :value="replyBody">
+
+                        <div class="flex justify-between items-center">
+                            <div class="relative">
+                                <input type="file" name="files" id="file-upload" multiple class="hidden" @change="handleFiles($event.target.files)">
+                                <button type="button" @click="document.getElementById('file-upload').click()" class="text-gray-500 hover:bg-gray-100 p-2 rounded-full transition flex items-center gap-2 text-sm font-medium" :title="t.attach_files">
+                                    <span class="text-lg">📎</span> <span x-text="t.attach_files"></span>
+                                </button>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <div x-show="isSending" class="w-24 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                    <div class="h-full bg-blue-600 transition-all duration-200" :style="`width: ${uploadProgress}%`"></div>
+                                </div>
+                                <button type="submit" :disabled="isSending" class="bg-blue-600 text-white px-8 py-2 rounded-full font-bold text-sm hover:bg-blue-700 transition shadow-md disabled:opacity-50 disabled:cursor-not-allowed">
+                                    <span x-show="!isSending" x-text="t.send"></span>
+                                    <span x-show="isSending" x-text="uploadProgress < 100 ? t.uploading : t.sending"></span>
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            </template>
+            {% endfor %}
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/mail_logic.js') }}"></script>
+
+    <!-- Context Menu -->
+    <div x-show="contextMenuOpen" 
+         id="context-menu"
+         @click.outside="contextMenuOpen = false"
+         :style="`top: ${contextMenuY}px; left: ${contextMenuX}px`"
+         class="fixed bg-white shadow-xl rounded-lg py-2 w-56 z-[60] border border-gray-100 text-sm font-medium text-gray-700" x-cloak x-transition>
+        
+        <div @click="replyToMsg(JSON.stringify(contextMenuTarget)); contextMenuOpen = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3">
+            <span>↩</span> <span x-text="t.reply"></span>
+        </div>
+        <div @click="forwardMsg(JSON.stringify(contextMenuTarget)); contextMenuOpen = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3">
+            <span>➔</span> <span x-text="t.forward"></span>
+        </div>
+        <div @click="blockSender(); contextMenuOpen = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3 text-red-600">
+            <span>🚫</span> <span x-text="t.block_sender"></span>
+        </div>
+        <div @click="markAsAd(); contextMenuOpen = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3 text-orange-600">
+            <span>📢</span> <span x-text="t.mark_as_ad"></span>
+        </div>
+        <div @click="whitelistSender(); contextMenuOpen = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3 text-green-600">
+            <span>✅</span> <span x-text="t.whitelist_sender"></span>
+        </div>
+        <div class="h-px bg-gray-100 my-1"></div>
+        <div @click="toggleReadStatus(); contextMenuOpen = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3">
+            <span x-text="contextMenuTarget.unread ? t.mark_read : t.mark_unread"></span>
+        </div>
+        <div @click="deleteThread(contextMenuTarget.uids); contextMenuOpen = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3 text-red-600">
+            <span>🗑️</span> <span x-text="t.delete"></span>
+        </div>
+        <div class="h-px bg-gray-100 my-1"></div>
+        <div class="px-4 py-2 text-xs text-gray-400 uppercase font-bold" x-text="t.move_to"></div>
+        <div class="max-h-48 overflow-y-auto">
+            {% for f in folders %}
+            <div @click="moveMail('{{ f.id }}'); contextMenuOpen = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3 pl-8">
+                <span class="truncate">{{ f.name }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div x-show="showSettings" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" x-cloak>
+        <div class="bg-white rounded-2xl w-full max-w-3xl shadow-2xl flex flex-col max-h-[85vh]" @click.away="showSettings = false" x-data="{ activeTab: 'general', logs: [], filters: {senders:[], ads_senders:[], whitelist:[]}, contacts: [], rules: [], labels: [], newContact: {name:'', email:''}, newRule: {keyword:'', folder:'', field:'subject'}, newLabel: {name:'', color:'#3b82f6', keyword:'', field:'subject'} }">
+            <div class="p-6 border-b border-gray-100 flex justify-between items-center">
+                <h2 class="text-2xl font-bold text-gray-800" x-text="t.settings"></h2>
+                <button @click="showSettings = false" class="text-gray-500 hover:bg-gray-100 rounded-full p-2">✕</button>
+            </div>
+            
+            <div class="flex border-b border-gray-100 px-6 bg-gray-50 rounded-t-lg">
+                <button @click="activeTab = 'general'" :class="activeTab === 'general' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.general"></button>
+                <button @click="activeTab = 'contacts'; fetch('/api/contacts').then(r=>r.json()).then(d=>contacts=d)" :class="activeTab === 'contacts' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.contacts"></button>
+                <button @click="activeTab = 'labels'; fetch('/api/labels').then(r=>r.json()).then(d=>labels=d)" :class="activeTab === 'labels' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.labels"></button>
+                <button @click="activeTab = 'rules'; fetch('/api/rules').then(r=>r.json()).then(d=>rules=d)" :class="activeTab === 'rules' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.rules"></button>
+                <button @click="activeTab = 'filters'; fetch('/api/get_filters').then(r=>r.json()).then(d=>filters=d)" :class="activeTab === 'filters' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.filters"></button>
+                <button @click="activeTab = 'logs'; fetch('/api/logs').then(r=>r.json()).then(d=>logs=d)" :class="activeTab === 'logs' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.logs"></button>
+            </div>
+
+            <div class="p-6 overflow-y-auto flex-1">
+                <!-- General Tab -->
+                <div x-show="activeTab === 'general'">
+                    <form id="settings-form" action="/save_settings" method="POST" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.email_username"></label>
+                            <input type="text" name="email" value="{{ settings.get('email', '') }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.password"></label>
+                            <input type="password" name="password" value="{{ settings.get('password', '') }}" autocomplete="new-password" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                        </div>
+                        <div class="grid grid-cols-12 gap-4">
+                            <div class="col-span-8">
+                                <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.imap_server"></label>
+                                <input type="text" name="imap_server" value="{{ settings.get('imap_server', '') }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                            </div>
+                            <div class="col-span-4">
+                                <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.port"></label>
+                                <input type="number" name="imap_port" value="{{ settings.get('imap_port', 993) }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                            </div>
+                            <div class="col-span-8">
+                                <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.smtp_server"></label>
+                                <input type="text" name="smtp_server" value="{{ settings.get('smtp_server', '') }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                            </div>
+                            <div class="col-span-4">
+                                <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.port"></label>
+                                <input type="number" name="smtp_port" value="{{ settings.get('smtp_port', 587) }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.layout"></label>
+                            <div class="flex gap-4">
+                                <label class="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="layout" value="normal" {{ 'checked' if settings.get('layout', 'normal') == 'normal' else '' }} class="text-blue-600 focus:ring-blue-500">
+                                    <span class="text-sm text-gray-700" x-text="t.normal"></span>
+                                </label>
+                                <label class="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="layout" value="compact" {{ 'checked' if settings.get('layout') == 'compact' else '' }} class="text-blue-600 focus:ring-blue-500">
+                                    <span class="text-sm text-gray-700" x-text="t.compact"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.language"></label>
+                            <select name="language" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                                <option value="sv" {{ 'selected' if settings.get('language', 'sv') == 'sv' else '' }}>{{ t['swedish'] }}</option>
+                                <option value="en" {{ 'selected' if settings.get('language') == 'en' else '' }}>{{ t['english'] }}</option>
+                                <option value="pl" {{ 'selected' if settings.get('language') == 'pl' else '' }}>{{ t['polish'] }}</option>
+                                <option value="de" {{ 'selected' if settings.get('language') == 'de' else '' }}>{{ t['german'] }}</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.signature"></label>
+                            <textarea name="signature" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition h-24 resize-none">{{ settings.get('signature', '') }}</textarea>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.web_password"></label>
+                            <input type="password" name="web_password" value="{{ settings.get('web_password', '') }}" autocomplete="new-password" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition" :placeholder="t.web_password_placeholder">
+                        </div>
+                        <div class="pt-2 flex justify-end">
+                            <button type="button" @click="if(confirm(t.restart_confirm)) { fetch('/api/restart', {method: 'POST'}); let checks = 0; const check = setInterval(() => { fetch('/').then(r => { if(r.ok) { clearInterval(check); window.location.reload(); } }).catch(() => {}); checks++; if(checks > 60) { clearInterval(check); alert('Kunde inte återansluta. Försök ladda om sidan manuellt.'); } }, 1000); alert('Servern startas om... Sidan laddas om när servern är redo.'); }" class="text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg text-sm font-bold transition border border-red-200">🔄 <span x-text="t.restart"></span></button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Contacts Tab -->
+                <div x-show="activeTab === 'contacts'">
+                    <div class="mb-6 bg-gray-50 p-4 rounded-lg border border-gray-200">
+                        <h3 class="font-bold text-gray-700 mb-3" x-text="t.add_contact"></h3>
+                        <div class="flex gap-3">
+                            <input type="text" x-model="newContact.name" :placeholder="t.name" class="flex-1 p-2 bg-gray-50 border border-gray-400 rounded-md text-sm outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                            <input type="email" x-model="newContact.email" :placeholder="t.email" class="flex-1 p-2 bg-gray-50 border border-gray-400 rounded-md text-sm outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                            <button @click="if(newContact.email) { const fd = new FormData(); fd.append('name', newContact.name); fd.append('email', newContact.email); fetch('/api/contacts', {method:'POST', body:fd}).then(() => { fetch('/api/contacts').then(r=>r.json()).then(d=>contacts=d); newContact.name=''; newContact.email=''; }); }" class="bg-blue-600 text-white px-4 py-2 rounded font-bold text-sm hover:bg-blue-700" x-text="t.add"></button>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-gray-700 mb-2" x-text="t.my_contacts"></h3>
+                        <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                            <template x-for="c in contacts">
+                                <div class="flex justify-between items-center p-3 border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                                    <div>
+                                        <div class="font-medium text-gray-800" x-text="c.name || 'Inget namn'"></div>
+                                        <div class="text-sm text-gray-500" x-text="c.email"></div>
+                                    </div>
+                                    <button @click="const fd = new FormData(); fd.append('id', c.id); fetch('/api/contacts/delete', {method:'POST', body:fd}).then(() => fetch('/api/contacts').then(r=>r.json()).then(d=>contacts=d))" class="text-red-500 hover:bg-red-50 p-2 rounded-full">🗑️</button>
+                                </div>
+                            </template>
+                            <div x-show="contacts.length === 0" class="p-4 text-center text-gray-500 italic" x-text="t.no_contacts"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Labels Tab -->
+                <div x-show="activeTab === 'labels'">
+                    <div class="mb-6 bg-gray-50 p-4 rounded-lg border border-gray-200">
+                        <h3 class="font-bold text-gray-700 mb-3" x-text="t.create_label"></h3>
+                        <div class="flex gap-3 mb-3">
+                            <input type="text" x-model="newLabel.name" :placeholder="t.label_name" class="flex-1 p-2 bg-gray-50 border border-gray-400 rounded-md text-sm outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                            <div class="flex items-center gap-2">
+                                <input type="color" x-model="newLabel.color" class="h-9 w-14 p-0 border border-gray-400 rounded cursor-pointer bg-white" title="Välj färg">
+                            </div>
+                        </div>
+                        <p class="text-xs text-gray-500 mb-2" x-text="t.apply_if"></p>
+                        <div class="flex gap-3">
+                            <select x-model="newLabel.field" class="p-2 bg-gray-50 border border-gray-400 rounded-md text-sm outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition w-32">
+                                <option value="subject" x-text="t.subject"></option>
+                                <option value="sender" x-text="t.sender"></option>
+                                <option value="both" x-text="t.both"></option>
+                            </select>
+                            <input type="text" x-model="newLabel.keyword" :placeholder="t.keyword_placeholder" class="flex-1 p-2 bg-gray-50 border border-gray-400 rounded-md text-sm outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                            <button @click="if(newLabel.name && newLabel.keyword) { const fd = new FormData(); fd.append('name', newLabel.name); fd.append('color', newLabel.color); fd.append('keyword', newLabel.keyword); fd.append('field', newLabel.field); fetch('/api/labels', {method:'POST', body:fd}).then(() => { fetch('/api/labels').then(r=>r.json()).then(d=>labels=d); newLabel.name=''; newLabel.keyword=''; alert(t.label_created); }); }" class="bg-blue-600 text-white px-4 py-2 rounded font-bold text-sm hover:bg-blue-700" x-text="t.save"></button>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-gray-700 mb-2" x-text="t.my_labels"></h3>
+                        <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                            <template x-for="l in labels">
+                                <div class="flex justify-between items-center p-3 border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                                    <div class="flex items-center gap-3 text-sm">
+                                        <span class="px-2 py-0.5 rounded text-xs font-bold text-white" :style="`background-color: ${l.color}`" x-text="l.name"></span>
+                                        <span class="text-gray-500" x-text="
+                                            (l.check_field === 'sender' ? t.if_sender + ' ' : 
+                                            l.check_field === 'both' ? t.if_subject_sender + ' ' : 
+                                            t.if_subject + ' ') + l.keyword
+                                        "></span>
+                                    </div>
+                                    <button @click="const fd = new FormData(); fd.append('id', l.id); fetch('/api/labels/delete', {method:'POST', body:fd}).then(() => fetch('/api/labels').then(r=>r.json()).then(d=>labels=d))" class="text-red-500 hover:bg-red-50 p-2 rounded-full">🗑️</button>
+                                </div>
+                            </template>
+                            <div x-show="labels.length === 0" class="p-4 text-center text-gray-500 italic" x-text="t.no_labels"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Rules Tab -->
+                <div x-show="activeTab === 'rules'">
+                    <div class="mb-6 bg-gray-50 p-4 rounded-lg border border-gray-200">
+                        <h3 class="font-bold text-gray-700 mb-3" x-text="t.create_rule"></h3>
+                        <p class="text-xs text-gray-500 mb-3" x-text="t.apply_if"></p>
+                        <div class="flex gap-3 mb-3">
+                            <select x-model="newRule.field" class="p-2 bg-gray-50 border border-gray-400 rounded-md text-sm outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition w-32">
+                                <option value="subject" x-text="t.subject"></option>
+                                <option value="sender" x-text="t.sender"></option>
+                                <option value="both" x-text="t.both"></option>
+                            </select>
+                            <input type="text" x-model="newRule.keyword" :placeholder="t.keyword_placeholder" class="flex-1 p-2 bg-gray-50 border border-gray-400 rounded-md text-sm outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                        </div>
+                        <p class="text-xs text-gray-500 mb-3" x-text="t.move_to_folder"></p>
+                        <div class="flex gap-3">
+                            <select x-model="newRule.folder" class="flex-1 p-2 bg-gray-50 border border-gray-400 rounded-md text-sm outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                                <option value="" x-text="t.select_folder"></option>
+                                {% for f in folders if not f.is_system or f.id == 'INBOX.Trash' %}
+                                <option value="{{ f.id }}">{{ f.name }}</option>
+                                {% endfor %}
+                            </select>
+                            <button @click="if(newRule.keyword && newRule.folder) { const fd = new FormData(); fd.append('keyword', newRule.keyword); fd.append('folder', newRule.folder); fd.append('field', newRule.field); fetch('/api/rules', {method:'POST', body:fd}).then(() => { fetch('/api/rules').then(r=>r.json()).then(d=>rules=d); newRule.keyword=''; newRule.folder=''; }); }" class="bg-blue-600 text-white px-4 py-2 rounded font-bold text-sm hover:bg-blue-700" x-text="t.save_rule"></button>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-gray-700 mb-2" x-text="t.active_rules"></h3>
+                        <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                            <template x-for="r in rules">
+                                <div class="flex justify-between items-center p-3 border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                                    <div class="flex items-center gap-2 text-sm">
+                                        <span class="text-gray-500" x-text="
+                                            r.check_field === 'sender' ? t.if_sender : 
+                                            r.check_field === 'both' ? t.if_subject_sender : 
+                                            t.if_subject
+                                        "></span>
+                                        <span class="font-bold bg-yellow-100 px-2 py-0.5 rounded text-gray-800" x-text="r.keyword"></span>
+                                        <span class="text-gray-500">➔ Flytta till:</span>
+                                        <span class="font-bold text-blue-600" x-text="r.target_folder"></span>
+                                    </div>
+                                    <button @click="const fd = new FormData(); fd.append('id', r.id); fetch('/api/rules/delete', {method:'POST', body:fd}).then(() => fetch('/api/rules').then(r=>r.json()).then(d=>rules=d))" class="text-red-500 hover:bg-red-50 p-2 rounded-full">🗑️</button>
+                                </div>
+                            </template>
+                            <div x-show="rules.length === 0" class="p-4 text-center text-gray-500 italic" x-text="t.no_rules"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Filters Tab -->
+                <div x-show="activeTab === 'filters'" class="space-y-6">
+                    <div>
+                        <h3 class="font-bold text-gray-700 mb-2" x-text="t.blocked_senders"></h3>
+                        <div class="bg-gray-50 rounded-lg p-2 max-h-32 overflow-y-auto border border-gray-200">
+                            <template x-for="s in filters.senders">
+                                <div class="text-sm text-gray-600 py-1 px-2 border-b border-gray-100 last:border-0" x-text="s"></div>
+                            </template>
+                            <div x-show="!filters.senders || filters.senders.length === 0" class="text-xs text-gray-400 italic p-2" x-text="t.no_blocked"></div>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-gray-700 mb-2" x-text="t.ad_senders"></h3>
+                        <div class="bg-gray-50 rounded-lg p-2 max-h-32 overflow-y-auto border border-gray-200">
+                            <template x-for="s in filters.ads_senders">
+                                <div class="text-sm text-gray-600 py-1 px-2 border-b border-gray-100 last:border-0" x-text="s"></div>
+                            </template>
+                            <div x-show="!filters.ads_senders || filters.ads_senders.length === 0" class="text-xs text-gray-400 italic p-2" x-text="t.no_ads"></div>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-gray-700 mb-2" x-text="t.trusted_senders"></h3>
+                        <div class="bg-gray-50 rounded-lg p-2 max-h-32 overflow-y-auto border border-gray-200">
+                            <template x-for="s in filters.whitelist">
+                                <div class="text-sm text-gray-600 py-1 px-2 border-b border-gray-100 last:border-0" x-text="s"></div>
+                            </template>
+                            <div x-show="!filters.whitelist || filters.whitelist.length === 0" class="text-xs text-gray-400 italic p-2" x-text="t.no_trusted"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Logs Tab -->
+                <div x-show="activeTab === 'logs'">
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 class="font-bold text-gray-700" x-text="t.event_log"></h3>
+                        <div class="flex gap-2">
+                            <button @click="isSendingLogs = true; fetch('/api/send_logs', {method: 'POST'}).then(r=>r.text()).then(text => { alert(text === 'OK' ? t.log_sent : t.error + ': ' + text); isSendingLogs = false; }).catch(e => { alert(t.could_not_send + ': ' + e); isSendingLogs = false; })" :disabled="isSendingLogs" class="text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2">
+                                <span x-show="!isSendingLogs" x-text="t.send_to_support"></span>
+                                <span x-show="isSendingLogs" x-text="t.sending"></span>
+                                <div x-show="isSendingLogs" class="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                            </button>
+                            <button @click="fetch('/api/logs').then(r=>r.json()).then(d=>logs=d)" class="text-xs text-blue-600 hover:underline" x-text="t.update"></button>
+                        </div>
+                    </div>
+                    <div class="bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-xs h-96 overflow-y-auto shadow-inner">
+                        <template x-for="log in logs">
+                            <div class="mb-1 border-b border-gray-800 pb-1 last:border-0" x-text="log"></div>
+                        </template>
+                        <div x-show="logs.length === 0" class="text-gray-500 italic" x-text="t.no_logs"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Footer (Sticky buttons) -->
+            <div x-show="activeTab === 'general'" class="p-4 border-t border-gray-200 bg-gray-50 rounded-b-2xl flex justify-end gap-3">
+                <button type="button" @click="showSettings = false" class="px-6 py-2 rounded-lg font-bold text-gray-500 hover:bg-gray-100 transition" x-text="t.cancel"></button>
+                <button type="submit" form="settings-form" class="px-6 py-2 rounded-lg font-bold bg-blue-600 text-white hover:bg-blue-700 transition shadow-sm" x-text="t.save"></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Compose Modal -->
+    <div x-show="showCompose" class="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center" x-cloak>
+        <div class="bg-white rounded-2xl w-full max-w-4xl h-[80vh] shadow-2xl flex flex-col" @click.away="if(!composeTo && !composeSubj && !composeBody) showCompose = false">
+            <div class="flex justify-between items-center p-4 border-b bg-gray-50 rounded-t-2xl">
+                <span class="font-bold text-gray-700" x-text="t.new_message"></span>
+                <button @click="showCompose = false" class="text-gray-500 hover:bg-gray-200 rounded-full p-1">✕</button>
+            </div>
+            <form action="/send" method="POST" enctype="multipart/form-data" class="flex-1 flex flex-col min-h-0" @dragover.prevent @drop.prevent="handleComposeFiles($event.dataTransfer.files)" @submit.prevent="sendAjax($event, false)">
+                <div class="px-4 py-3 relative">
+                    <input type="text" name="to" x-model="composeTo" @input="onContactInput()" @click.outside="showContactSuggestions = false" :placeholder="t.to" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition" required autocomplete="off">
+                    <div x-show="showContactSuggestions" class="absolute top-full left-0 right-0 bg-white shadow-lg border border-gray-200 z-[100] max-h-48 overflow-y-auto rounded-b-lg" x-transition>
+                        <template x-for="s in contactSuggestions">
+                            <div @click="composeTo = s; showContactSuggestions = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer text-sm text-gray-700" x-text="s"></div>
+                        </template>
+                    </div>
+                </div>
+                <div class="px-4 py-3">
+                    <input type="text" name="subject" x-model="composeSubj" :placeholder="t.subject" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition" required>
+                </div>
+                <div class="flex-1 p-4 overflow-y-auto min-h-0">
+                    <div id="compose-editor" contenteditable="true" class="w-full min-h-full h-auto outline-none font-sans p-3 bg-gray-50 border border-gray-400 rounded-md focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition" placeholder="Skriv ditt meddelande här..." @input="composeBody = $event.target.innerHTML"></div>
+                    <input type="hidden" name="body" :value="composeBody">
+                </div>
+                
+                <div class="border-t bg-gray-50">
+                    <!-- Attachments list -->
+                    <div class="px-4 pt-2 flex flex-wrap gap-2 max-h-32 overflow-y-auto" x-show="composeAttachments.length > 0">
+                        <template x-for="(file, index) in composeAttachments" :key="index">
+                            <div class="flex items-center bg-gray-100 px-3 py-1 rounded-full text-xs font-medium text-gray-700 border border-gray-200">
+                                <span x-text="file.name" class="max-w-[200px] truncate mr-2"></span>
+                                <button type="button" @click="removeComposeFile(index)" class="text-gray-400 hover:text-red-500 font-bold">✕</button>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="p-4 flex justify-between items-center">
+                        <div class="relative">
+                        <input type="file" name="files" id="compose-file-upload" multiple class="hidden" @change="handleComposeFiles($event.target.files)">
+                        <button type="button" @click="document.getElementById('compose-file-upload').click()" class="text-gray-500 hover:bg-gray-200 p-2 rounded-full transition flex items-center gap-2" :title="t.attach_files">
+                            <span class="text-xl">📎</span> <span x-text="t.attach_files"></span>
+                        </button>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div x-show="isSending" class="w-24 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                            <div class="h-full bg-blue-600 transition-all duration-200" :style="`width: ${uploadProgress}%`"></div>
+                        </div>
+                        <button type="submit" :disabled="isSending" class="bg-blue-600 text-white px-8 py-2 rounded-full font-bold hover:bg-blue-700 transition shadow-md disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span x-show="!isSending" x-text="t.send"></span>
+                            <span x-show="isSending" x-text="uploadProgress < 100 ? t.uploading : t.sending"></span>
+                        </button>
+                    </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Doc Preview Modal -->
+    <div x-show="previewDocOpen" class="fixed inset-0 bg-black/75 z-[90] flex items-center justify-center" x-cloak>
+        <div class="bg-white rounded-xl w-full max-w-6xl h-[90vh] flex flex-col shadow-2xl" @click.away="previewDocOpen = false">
+            <div class="flex justify-between items-center p-4 border-b">
+                <h3 class="font-bold text-lg truncate" x-text="previewFilename"></h3>
+                <button @click="previewDocOpen = false" class="text-gray-500 hover:bg-gray-100 p-2 rounded-full">✕</button>
+            </div>
+            <div class="flex-1 overflow-auto p-4" id="doc-preview-content" x-html="previewHtml"></div>
+        </div>
+    </div>
+
+    <!-- Create Folder Modal -->
+    <div x-show="showCreateFolder" class="fixed inset-0 bg-black/50 z-[80] flex items-center justify-center" x-cloak>
+        <div class="bg-white rounded-2xl p-8 w-full max-w-sm shadow-2xl" @click.away="showCreateFolder = false">
+            <h2 class="text-xl font-bold mb-4 text-gray-800" x-text="t.create_folder"></h2>
+            <form @submit.prevent="submitCreateFolder()" class="space-y-4">
+                <div>
+                    <input type="text" x-model="newFolderName" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition" :placeholder="t.folder_name" required autofocus>
+                </div>
+                
+                <div x-show="availableIcons.length > 0" class="mt-4">
+                    <label class="block text-xs font-bold text-gray-500 uppercase mb-2" x-text="t.select_icon"></label>
+                    <div class="grid grid-cols-5 gap-2 max-h-40 overflow-y-auto p-1">
+                        <template x-for="icon in availableIcons">
+                            <div @click="selectedIcon = icon" :class="selectedIcon === icon ? 'bg-blue-100 border-blue-500 ring-2 ring-blue-200' : 'border-gray-200 hover:bg-gray-50'" class="p-2 border rounded-lg cursor-pointer flex items-center justify-center transition h-12">
+                                 <img :src="'/static/ikoner/folder/' + icon" class="w-8 h-8 object-contain">
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-3 mt-6">
+                    <button type="button" @click="showCreateFolder = false" class="px-4 py-2 rounded-lg font-bold text-gray-500 hover:bg-gray-100" x-text="t.cancel"></button>
+                    <button type="submit" class="px-6 py-2 rounded-lg font-bold bg-blue-600 text-white hover:bg-blue-700" x-text="t.create"></button>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

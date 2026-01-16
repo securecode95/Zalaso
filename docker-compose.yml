@@ -1,0 +1,31 @@
+services:
+  # ZALASO - Din egna Gmail-klient
+  zalaso:
+    build: ./zalaso_client
+    container_name: zalaso_app
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./zalaso_client:/app  # Gör att du kan ändra kod live utan omstart
+    networks:
+      - zalaso_net
+    depends_on:
+      - mail-server
+    restart: always
+
+  # MAILSERVER (Greenmail)
+  mail-server:
+    image: greenmail/standalone:latest
+    container_name: zalaso_mail_server
+    expose:
+      - "3025" # SMTP (Skicka)
+      - "3143" # IMAP (Hämta)
+    environment:
+      - GREENMAIL_OPTS=-Dgreenmail.users=retrobalder@zalaso.se:zalaso -Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0
+    networks:
+      - zalaso_net
+    restart: always
+
+networks:
+  zalaso_net:
+    driver: bridge

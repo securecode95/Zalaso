@@ -1,0 +1,17 @@
+venv/
+__pycache__/
+*.pyc
+dist/
+build/
+*.spec
+zalaso.db
+*.db
+settings.json
+read_status.json
+star_status.json
+folder_icons.json
+spam_filters.json
+zalaso.log
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,10 @@
+{
+    "email": "info@digitaltvcenter.se",
+    "password": "kjelles32",
+    "imap_server": "mailcluster.loopia.se",
+    "imap_port": "993",
+    "smtp_server": "mailcluster.loopia.se",
+    "smtp_port": "587",
+    "signature": "--------------------------------------------------------------\r\nKjells Elektronik & Digital-Tv Center AB\r\nJ\u00e4rnv\u00e4gsgatan 25\r\n565 32 Mullsj\u00f6\r\nTel.0392-10 200\r\nMob.0761-72 73 89\r\ninfo@digitaltvcenter.se\r\nwww.digitaltvcenter.se\r\n\u00d6ppettider: \r\nm\u00e5ndag\t09:30\u201318\r\ntisdag\t09:30\u201313\r\nonsdag\t13\u201318\r\ntorsdag\t09:30\u201313\r\nfredag\t09:30\u201313\r\nl\u00f6rdag\tSt\u00e4ngt\r\ns\u00f6ndag\tSt\u00e4ngt",
+    "web_password": "kjelles32"
+}
