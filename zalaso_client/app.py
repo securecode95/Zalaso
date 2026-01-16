@@ -2067,7 +2067,7 @@ if __name__ == '__main__':
     threading.Timer(1.5, open_browser).start()
     
     is_frozen = getattr(sys, 'frozen', False)
-    host = '127.0.0.1' if is_frozen else '0.0.0.0'
+    host = '0.0.0.0'
     debug = not is_frozen
     
     app.run(host=host, port=5000, debug=debug)
