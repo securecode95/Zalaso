@@ -1064,6 +1064,7 @@
             
             <div class="flex border-b border-gray-100 px-6 bg-gray-50 rounded-t-lg">
                 <button @click="activeTab = 'general'" :class="activeTab === 'general' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.general"></button>
+                <button @click="activeTab = 'connection'" :class="activeTab === 'connection' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.connection"></button>
                 <button @click="activeTab = 'contacts'; fetch('/api/contacts').then(r=>r.json()).then(d=>contacts=d)" :class="activeTab === 'contacts' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.contacts"></button>
                 <button @click="activeTab = 'labels'; fetch('/api/labels').then(r=>r.json()).then(d=>labels=d)" :class="activeTab === 'labels' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.labels"></button>
                 <button @click="activeTab = 'rules'; fetch('/api/rules').then(r=>r.json()).then(d=>rules=d)" :class="activeTab === 'rules' ? 'border-blue-600 text-blue-600 bg-white' : 'border-transparent text-gray-500 hover:text-gray-700'" class="py-3 px-6 border-b-2 font-medium text-sm transition rounded-t-lg" x-text="t.rules"></button>
@@ -1072,35 +1073,9 @@
             </div>
 
             <div class="p-6 overflow-y-auto flex-1">
+                <form id="settings-form" action="/save_settings" method="POST" class="h-full flex flex-col">
                 <!-- General Tab -->
-                <div x-show="activeTab === 'general'">
-                    <form id="settings-form" action="/save_settings" method="POST" class="space-y-4">
-                        <div>
-                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.email_username"></label>
-                            <input type="text" name="email" value="{{ settings.get('email', '') }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.password"></label>
-                            <input type="password" name="password" value="{{ settings.get('password', '') }}" autocomplete="new-password" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
-                        </div>
-                        <div class="grid grid-cols-12 gap-4">
-                            <div class="col-span-8">
-                                <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.imap_server"></label>
-                                <input type="text" name="imap_server" value="{{ settings.get('imap_server', '') }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
-                            </div>
-                            <div class="col-span-4">
-                                <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.port"></label>
-                                <input type="number" name="imap_port" value="{{ settings.get('imap_port', 993) }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
-                            </div>
-                            <div class="col-span-8">
-                                <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.smtp_server"></label>
-                                <input type="text" name="smtp_server" value="{{ settings.get('smtp_server', '') }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
-                            </div>
-                            <div class="col-span-4">
-                                <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.port"></label>
-                                <input type="number" name="smtp_port" value="{{ settings.get('smtp_port', 587) }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
-                            </div>
-                        </div>
+                <div x-show="activeTab === 'general'" class="space-y-4">
                         <div>
                             <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.layout"></label>
                             <div class="flex gap-4">
@@ -1134,8 +1109,52 @@
                         <div class="pt-2 flex justify-end">
                             <button type="button" @click="if(confirm(t.restart_confirm)) { fetch('/api/restart', {method: 'POST'}); let checks = 0; const check = setInterval(() => { fetch('/').then(r => { if(r.ok) { clearInterval(check); window.location.reload(); } }).catch(() => {}); checks++; if(checks > 60) { clearInterval(check); alert('Kunde inte återansluta. Försök ladda om sidan manuellt.'); } }, 1000); alert('Servern startas om... Sidan laddas om när servern är redo.'); }" class="text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg text-sm font-bold transition border border-red-200">🔄 <span x-text="t.restart"></span></button>
                         </div>
-                    </form>
                 </div>
+
+                <!-- Connection Tab -->
+                <div x-show="activeTab === 'connection'" class="space-y-4">
+                    <div class="bg-blue-50 p-4 rounded-lg border border-blue-100 mb-4">
+                        <label class="block text-xs font-bold text-blue-600 uppercase mb-2" x-text="t.presets"></label>
+                        <div class="flex gap-3">
+                            <button type="button" @click="document.getElementsByName('imap_server')[0].value='imap.gmail.com'; document.getElementsByName('imap_port')[0].value='993'; document.getElementsByName('smtp_server')[0].value='smtp.gmail.com'; document.getElementsByName('smtp_port')[0].value='587';" class="flex items-center gap-2 bg-white border border-gray-200 px-4 py-2 rounded-lg hover:shadow-md transition text-sm font-bold text-gray-700">
+                                <img src="https://www.google.com/favicon.ico" class="w-4 h-4"> Google (Gmail)
+                            </button>
+                            <button type="button" @click="document.getElementsByName('imap_server')[0].value='outlook.office365.com'; document.getElementsByName('imap_port')[0].value='993'; document.getElementsByName('smtp_server')[0].value='smtp.office365.com'; document.getElementsByName('smtp_port')[0].value='587';" class="flex items-center gap-2 bg-white border border-gray-200 px-4 py-2 rounded-lg hover:shadow-md transition text-sm font-bold text-gray-700">
+                                <img src="https://www.microsoft.com/favicon.ico" class="w-4 h-4"> Microsoft (Outlook)
+                            </button>
+                        </div>
+                    </div>
+                    <div class="space-y-4 mb-6 border-b border-gray-100 pb-6">
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.email_username"></label>
+                            <input type="text" name="email" value="{{ settings.get('email', '') }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.password"></label>
+                            <input type="password" name="password" value="{{ settings.get('password', '') }}" autocomplete="new-password" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                            <p class="text-xs text-gray-500 mt-1" x-text="t.app_password_hint"></p>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-12 gap-4">
+                        <div class="col-span-8">
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.imap_server"></label>
+                            <input type="text" name="imap_server" value="{{ settings.get('imap_server', '') }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                        </div>
+                        <div class="col-span-4">
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.port"></label>
+                            <input type="number" name="imap_port" value="{{ settings.get('imap_port', 993) }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                        </div>
+                        <div class="col-span-8">
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.smtp_server"></label>
+                            <input type="text" name="smtp_server" value="{{ settings.get('smtp_server', '') }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                        </div>
+                        <div class="col-span-4">
+                            <label class="block text-xs font-bold text-gray-500 uppercase mb-1" x-text="t.port"></label>
+                            <input type="number" name="smtp_port" value="{{ settings.get('smtp_port', 587) }}" class="w-full p-2 bg-gray-50 border border-gray-400 rounded-md outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition">
+                        </div>
+                    </div>
+                </div>
+                </form>
 
                 <!-- Contacts Tab -->
                 <div x-show="activeTab === 'contacts'">
@@ -1307,7 +1326,7 @@
             </div>
             
             <!-- Footer (Sticky buttons) -->
-            <div x-show="activeTab === 'general'" class="p-4 border-t border-gray-200 bg-gray-50 rounded-b-2xl flex justify-end gap-3">
+            <div x-show="activeTab === 'general' || activeTab === 'connection'" class="p-4 border-t border-gray-200 bg-gray-50 rounded-b-2xl flex justify-end gap-3">
                 <button type="button" @click="showSettings = false" class="px-6 py-2 rounded-lg font-bold text-gray-500 hover:bg-gray-100 transition" x-text="t.cancel"></button>
                 <button type="submit" form="settings-form" class="px-6 py-2 rounded-lg font-bold bg-blue-600 text-white hover:bg-blue-700 transition shadow-sm" x-text="t.save"></button>
             </div>

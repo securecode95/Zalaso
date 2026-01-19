@@ -72,11 +72,12 @@ TRANSLATIONS = {
         'undo_delete': 'Konversationen har raderats.', 'undo_move': 'Konversationen flyttades.', 'undo': 'Ångra',
         'reply': 'Svara', 'forward': 'Vidarebefordra', 'delete': 'Radera', 'mark_read': 'Markera som läst', 'mark_unread': 'Markera som oläst',
         'move_to': 'Flytta till', 'block_sender': 'Blockera avsändare', 'mark_as_ad': 'Markera som reklam', 'whitelist_sender': 'Betrodd avsändare',
-        'general': 'Allmänt', 'contacts': 'Kontakter', 'labels': 'Etiketter', 'rules': 'Regler', 'filters': 'Filter', 'logs': 'Logg',
+        'general': 'Allmänt', 'connection': 'Anslutning', 'presets': 'Snabbval', 'contacts': 'Kontakter', 'labels': 'Etiketter', 'rules': 'Regler', 'filters': 'Filter', 'logs': 'Logg',
         'save': 'Spara', 'cancel': 'Avbryt', 'email_username': 'Email / Användarnamn', 'password': 'Lösenord',
         'imap_server': 'IMAP Server', 'port': 'Port', 'smtp_server': 'SMTP Server', 'layout': 'Layout', 'normal': 'Normal', 'compact': 'Kompakt',
         'signature': 'Signatur', 'web_password': 'Webb-lösenord (Valfritt)', 'web_password_placeholder': 'Lämna tomt för inget skydd',
         'restart': 'Starta om', 'restart_confirm': 'Är du säker på att du vill starta om servern?',
+        'app_password_hint': 'För Gmail/Outlook: Använd App-lösenord om 2FA är aktiverat.',
         'add_contact': 'Lägg till kontakt', 'name': 'Namn', 'email': 'E-post', 'add': 'Lägg till', 'my_contacts': 'Mina kontakter',
         'no_contacts': 'Inga kontakter sparade än.', 'create_label': 'Skapa ny etikett', 'label_name': 'Etikettnamn', 'apply_if': 'Applicera om...',
         'subject': 'Ämne', 'sender': 'Avsändare', 'both': 'Båda', 'keyword_placeholder': 'Nyckelord (t.ex. order, faktura)...',
@@ -112,11 +113,12 @@ TRANSLATIONS = {
         'undo_delete': 'Conversation deleted.', 'undo_move': 'Conversation moved.', 'undo': 'Undo',
         'reply': 'Reply', 'forward': 'Forward', 'delete': 'Delete', 'mark_read': 'Mark as read', 'mark_unread': 'Mark as unread',
         'move_to': 'Move to', 'block_sender': 'Block sender', 'mark_as_ad': 'Mark as ad', 'whitelist_sender': 'Trusted sender',
-        'general': 'General', 'contacts': 'Contacts', 'labels': 'Labels', 'rules': 'Rules', 'filters': 'Filters', 'logs': 'Logs',
+        'general': 'General', 'connection': 'Connection', 'presets': 'Presets', 'contacts': 'Contacts', 'labels': 'Labels', 'rules': 'Rules', 'filters': 'Filters', 'logs': 'Logs',
         'save': 'Save', 'cancel': 'Cancel', 'email_username': 'Email / Username', 'password': 'Password',
         'imap_server': 'IMAP Server', 'port': 'Port', 'smtp_server': 'SMTP Server', 'layout': 'Layout', 'normal': 'Normal', 'compact': 'Compact',
         'signature': 'Signature', 'web_password': 'Web Password (Optional)', 'web_password_placeholder': 'Leave empty for no protection',
         'restart': 'Restart', 'restart_confirm': 'Are you sure you want to restart the server?',
+        'app_password_hint': 'For Gmail/Outlook: Use App Password if 2FA is enabled.',
         'add_contact': 'Add Contact', 'name': 'Name', 'email': 'Email', 'add': 'Add', 'my_contacts': 'My Contacts',
         'no_contacts': 'No contacts saved yet.', 'create_label': 'Create New Label', 'label_name': 'Label Name', 'apply_if': 'Apply if...',
         'subject': 'Subject', 'sender': 'Sender', 'both': 'Both', 'keyword_placeholder': 'Keyword (e.g. order, invoice)...',
@@ -152,11 +154,12 @@ TRANSLATIONS = {
         'undo_delete': 'Rozmowa usunięta.', 'undo_move': 'Rozmowa przeniesiona.', 'undo': 'Cofnij',
         'reply': 'Odpowiedz', 'forward': 'Przekaż', 'delete': 'Usuń', 'mark_read': 'Oznacz jako przeczytane', 'mark_unread': 'Oznacz jako nieprzeczytane',
         'move_to': 'Przenieś do', 'block_sender': 'Zablokuj nadawcę', 'mark_as_ad': 'Oznacz jako reklamę', 'whitelist_sender': 'Zaufany nadawca',
-        'general': 'Ogólne', 'contacts': 'Kontakty', 'labels': 'Etykiety', 'rules': 'Reguły', 'filters': 'Filtry', 'logs': 'Logi',
+        'general': 'Ogólne', 'connection': 'Połączenie', 'presets': 'Presety', 'contacts': 'Kontakty', 'labels': 'Etykiety', 'rules': 'Reguły', 'filters': 'Filtry', 'logs': 'Logi',
         'save': 'Zapisz', 'cancel': 'Anuluj', 'email_username': 'Email / Nazwa użytkownika', 'password': 'Hasło',
         'imap_server': 'Serwer IMAP', 'port': 'Port', 'smtp_server': 'Serwer SMTP', 'layout': 'Układ', 'normal': 'Normalny', 'compact': 'Kompaktowy',
         'signature': 'Podpis', 'web_password': 'Hasło WWW (Opcjonalne)', 'web_password_placeholder': 'Pozostaw puste dla braku ochrony',
         'restart': 'Uruchom ponownie', 'restart_confirm': 'Czy na pewno chcesz ponownie uruchomić serwer?',
+        'app_password_hint': 'Dla Gmail/Outlook: Użyj hasła aplikacji, jeśli włączone jest 2FA.',
         'add_contact': 'Dodaj kontakt', 'name': 'Nazwa', 'email': 'Email', 'add': 'Dodaj', 'my_contacts': 'Moje kontakty',
         'no_contacts': 'Brak zapisanych kontaktów.', 'create_label': 'Utwórz nową etykietę', 'label_name': 'Nazwa etykiety', 'apply_if': 'Zastosuj jeśli...',
         'subject': 'Temat', 'sender': 'Nadawca', 'both': 'Oba', 'keyword_placeholder': 'Słowo kluczowe (np. zamówienie, faktura)...',
@@ -192,11 +195,12 @@ TRANSLATIONS = {
         'undo_delete': 'Konversation gelöscht.', 'undo_move': 'Konversation verschoben.', 'undo': 'Rückgängig',
         'reply': 'Antworten', 'forward': 'Weiterleiten', 'delete': 'Löschen', 'mark_read': 'Als gelesen markieren', 'mark_unread': 'Als ungelesen markieren',
         'move_to': 'Verschieben nach', 'block_sender': 'Absender blockieren', 'mark_as_ad': 'Als Werbung markieren', 'whitelist_sender': 'Vertrauenswürdiger Absender',
-        'general': 'Allgemein', 'contacts': 'Kontakte', 'labels': 'Labels', 'rules': 'Regeln', 'filters': 'Filter', 'logs': 'Protokolle',
+        'general': 'Allgemein', 'connection': 'Verbindung', 'presets': 'Voreinstellungen', 'contacts': 'Kontakte', 'labels': 'Labels', 'rules': 'Regeln', 'filters': 'Filter', 'logs': 'Protokolle',
         'save': 'Speichern', 'cancel': 'Abbrechen', 'email_username': 'E-Mail / Benutzername', 'password': 'Passwort',
         'imap_server': 'IMAP-Server', 'port': 'Port', 'smtp_server': 'SMTP-Server', 'layout': 'Layout', 'normal': 'Normal', 'compact': 'Kompakt',
         'signature': 'Signatur', 'web_password': 'Web-Passwort (Optional)', 'web_password_placeholder': 'Leer lassen für keinen Schutz',
         'restart': 'Neustart', 'restart_confirm': 'Sind Sie sicher, dass Sie den Server neu starten möchten?',
+        'app_password_hint': 'Für Gmail/Outlook: Verwenden Sie ein App-Passwort, wenn 2FA aktiviert ist.',
         'add_contact': 'Kontakt hinzufügen', 'name': 'Name', 'email': 'E-Mail', 'add': 'Hinzufügen', 'my_contacts': 'Meine Kontakte',
         'no_contacts': 'Noch keine Kontakte gespeichert.', 'create_label': 'Neues Label erstellen', 'label_name': 'Labelname', 'apply_if': 'Anwenden wenn...',
         'subject': 'Betreff', 'sender': 'Absender', 'both': 'Beide', 'keyword_placeholder': 'Stichwort (z.B. Bestellung, Rechnung)...',
@@ -2062,7 +2066,7 @@ if __name__ == '__main__':
     init_db()
     # Öppna webbläsaren automatiskt efter 1.5 sekunder
     def open_browser():
-        try: webbrowser.open('http://127.0.0.1:5000')
+        try: webbrowser.open('http://127.0.0.1')
         except: pass
     threading.Timer(1.5, open_browser).start()
     
@@ -2070,4 +2074,4 @@ if __name__ == '__main__':
     host = '0.0.0.0'
     debug = not is_frozen
     
-    app.run(host=host, port=5000, debug=debug)
+    app.run(host=host, port=80, debug=debug)

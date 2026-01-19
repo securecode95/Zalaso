@@ -56,6 +56,17 @@
             <p class="text-blue-100">{{ t['configure_account'] }}</p>
         </div>
         
+        <div class="px-8 pt-6 flex gap-4 justify-center">
+            <button type="button" onclick="document.getElementsByName('imap_server')[0].value='imap.gmail.com'; document.getElementsByName('imap_port')[0].value='993'; document.getElementsByName('smtp_server')[0].value='smtp.gmail.com'; document.getElementsByName('smtp_port')[0].value='587';" class="flex items-center gap-2 bg-white border border-gray-200 px-6 py-3 rounded-xl hover:shadow-md transition text-sm font-bold text-gray-700">
+                <img src="https://www.google.com/favicon.ico" class="w-5 h-5">
+                Google (Gmail)
+            </button>
+            <button type="button" onclick="document.getElementsByName('imap_server')[0].value='outlook.office365.com'; document.getElementsByName('imap_port')[0].value='993'; document.getElementsByName('smtp_server')[0].value='smtp.office365.com'; document.getElementsByName('smtp_port')[0].value='587';" class="flex items-center gap-2 bg-white border border-gray-200 px-6 py-3 rounded-xl hover:shadow-md transition text-sm font-bold text-gray-700">
+                <img src="https://www.microsoft.com/favicon.ico" class="w-5 h-5">
+                Microsoft (Outlook)
+            </button>
+        </div>
+
         <form action="/save_settings" method="POST" class="p-8 space-y-6">
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <!-- Konto -->
