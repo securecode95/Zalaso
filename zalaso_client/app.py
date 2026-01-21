@@ -10,6 +10,11 @@ from email.utils import formatdate
 import sqlite3
 import threading
 
+try:
+    from pyngrok import ngrok, conf
+except ImportError:
+    ngrok = None
+
 def resource_path(relative_path):
     """ Hitta sökväg till resurser, fungerar för dev och PyInstaller """
     try:
@@ -1509,6 +1514,39 @@ def create_folder():
         log_event(f"Error creating folder: {e}")
         return str(e)
 
+support_tunnel_url = None
+
+@app.route('/api/support/start', methods=['POST'])
+def start_support():
+    global support_tunnel_url
+    if not ngrok:
+        return "Support-modul saknas (pyngrok)."
+    
+    if support_tunnel_url:
+        return support_tunnel_url
+
+    try:
+        # Hämta porten som appen körs på
+        port = app.config.get('SERVER_PORT', 80)
+        # Starta tunnel (http protokoll till lokal port)
+        tunnel = ngrok.connect(port)
+        support_tunnel_url = tunnel.public_url
+        log_event(f"Remote support startad: {support_tunnel_url}")
+        return support_tunnel_url
+    except Exception as e:
+        return f"Fel vid start av support: {str(e)}"
+
+@app.route('/api/support/stop', methods=['POST'])
+def stop_support():
+    global support_tunnel_url
+    if not ngrok: return "Modul saknas"
+    try:
+        ngrok.kill()
+        support_tunnel_url = None
+        log_event("Remote support avslutad")
+        return "OK"
+    except Exception as e: return str(e)
+
 @app.route('/api/delete_folder', methods=['POST'])
 def delete_folder():
     name = request.form.get('name')
@@ -2192,4 +2230,5 @@ if __name__ == '__main__':
     threading.Timer(1.5, open_browser).start()
     
     print(f"Startar Zalaso Mail på port {port}...")
+    app.config['SERVER_PORT'] = port
     app.run(host=host, port=port, debug=debug)

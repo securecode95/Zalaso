@@ -13,6 +13,7 @@ if not exist "venv" (
 call venv\Scripts\activate
 pip install -r requirements.txt
 pip install pyinstaller
+pip install pyngrok
 
 echo Creating EXE...
 :: --windowed hides the console
