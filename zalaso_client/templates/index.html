@@ -651,7 +651,7 @@
         </nav>
 
         <!-- Labels Section -->
-        <div x-data="{ labelsOpen: false }" class="mt-2 border-t border-gray-200">
+        <div x-data="{ labelsOpen: localStorage.getItem('labelsOpen') === 'true' }" x-init="$watch('labelsOpen', val => localStorage.setItem('labelsOpen', val))" class="mt-2 border-t border-gray-200">
             <div @click="labelsOpen = !labelsOpen" class="pt-4 pb-2 px-4 text-xs font-bold text-gray-500 uppercase flex justify-between items-center cursor-pointer hover:bg-gray-100 transition select-none">
                 <div class="flex items-center gap-2">
                     <span class="transform transition-transform duration-200 text-[10px]" :class="labelsOpen ? 'rotate-90' : ''">▶</span>
