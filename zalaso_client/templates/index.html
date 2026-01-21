@@ -1360,6 +1360,13 @@
                 <div x-show="activeTab === 'logs'">
                     <div class="mb-6 bg-blue-50 p-4 rounded-lg border border-blue-100">
                         <h3 class="font-bold text-blue-800 mb-2" x-text="t.remote_support"></h3>
+                        <div class="mb-3">
+                            <label class="block text-xs font-bold text-blue-600 uppercase mb-1" x-text="t.ngrok_token_label"></label>
+                            <div class="flex gap-2">
+                                <input type="password" value="{{ settings.get('ngrok_token', '') }}" placeholder="Ex. 2Q..." class="flex-1 p-2 bg-white border border-blue-300 rounded text-sm text-gray-600 outline-none focus:border-blue-500" onchange="const fd = new FormData(); fd.append('token', this.value); fetch('/api/save_ngrok_token', {method:'POST', body:fd})">
+                            </div>
+                            <p class="text-[10px] text-blue-400 mt-1" x-text="t.ngrok_token_help"></p>
+                        </div>
                         <div class="flex items-center gap-3" x-data="{ supportUrl: '', loading: false }">
                             <button @click="loading=true; fetch('/api/support/start', {method:'POST'}).then(r=>r.text()).then(url=>{ supportUrl=url; loading=false; })" x-show="!supportUrl" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-blue-700 transition" :disabled="loading">
                                 <span x-show="!loading" x-text="t.generate_link"></span>

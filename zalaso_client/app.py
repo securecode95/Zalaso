@@ -119,7 +119,8 @@ TRANSLATIONS = {
         'label_created': 'Etikett skapad! Appliceras på befintliga mail i bakgrunden.', 'log_sent': 'Logg skickad!', 'error': 'Fel',
         'could_not_send': 'Kunde inte skicka', 'could_not_create_folder': 'Kunde inte skapa mapp', 'an_error_occurred': 'Ett fel inträffade.',
         'reply_to': 'Svarar till:', 'forwarding': 'Vidarebefordra', 'forwarded_message': '---------- Vidarebefordrat meddelande ----------', 'wrote': 'skrev', 'reklam': 'Reklam',
-        'remote_support': 'Fjärrsupport', 'generate_link': 'Generera länk', 'starting': 'Startar...', 'copy': 'Kopiera', 'stop': 'Avsluta', 'support_hint': 'Ge denna länk till supporten.'
+        'remote_support': 'Fjärrsupport', 'generate_link': 'Generera länk', 'starting': 'Startar...', 'copy': 'Kopiera', 'stop': 'Avsluta', 'support_hint': 'Ge denna länk till supporten.',
+        'ngrok_token_label': 'Ngrok Authtoken', 'ngrok_token_help': 'Krävs. Hämta gratis på dashboard.ngrok.com', 'ngrok_missing': 'Authtoken saknas. Ange den ovan.'
     },
     'en': {
         'inbox': 'Inbox', 'sent': 'Sent', 'drafts': 'Drafts', 'trash': 'Trash', 'spam': 'Spam', 'starred': 'Starred',
@@ -161,7 +162,8 @@ TRANSLATIONS = {
         'label_created': 'Label created! Applying to existing emails in background.', 'log_sent': 'Log sent!', 'error': 'Error',
         'could_not_send': 'Could not send', 'could_not_create_folder': 'Could not create folder', 'an_error_occurred': 'An error occurred.',
         'reply_to': 'Replying to:', 'forwarding': 'Forwarding', 'forwarded_message': '---------- Forwarded message ----------', 'wrote': 'wrote', 'reklam': 'Ads',
-        'remote_support': 'Remote Support', 'generate_link': 'Generate Link', 'starting': 'Starting...', 'copy': 'Copy', 'stop': 'Stop', 'support_hint': 'Give this link to support.'
+        'remote_support': 'Remote Support', 'generate_link': 'Generate Link', 'starting': 'Starting...', 'copy': 'Copy', 'stop': 'Stop', 'support_hint': 'Give this link to support.',
+        'ngrok_token_label': 'Ngrok Authtoken', 'ngrok_token_help': 'Required. Get free at dashboard.ngrok.com', 'ngrok_missing': 'Authtoken missing. Enter it above.'
     },
     'pl': {
         'inbox': 'Odebrane', 'sent': 'Wysłane', 'drafts': 'Wersje robocze', 'trash': 'Kosz', 'spam': 'Spam', 'starred': 'Oznaczone gwiazdką',
@@ -203,7 +205,8 @@ TRANSLATIONS = {
         'label_created': 'Etykieta utworzona! Stosowanie do istniejących wiadomości w tle.', 'log_sent': 'Log wysłany!', 'error': 'Błąd',
         'could_not_send': 'Nie można wysłać', 'could_not_create_folder': 'Nie można utworzyć folderu', 'an_error_occurred': 'Wystąpił błąd.',
         'reply_to': 'Odpowiedź do:', 'forwarding': 'Przekazywanie', 'forwarded_message': '---------- Przekazana wiadomość ----------', 'wrote': 'napisał(a)', 'reklam': 'Reklamy',
-        'remote_support': 'Zdalne wsparcie', 'generate_link': 'Generuj link', 'starting': 'Uruchamianie...', 'copy': 'Kopiuj', 'stop': 'Zatrzymaj', 'support_hint': 'Podaj ten link pomocy technicznej.'
+        'remote_support': 'Zdalne wsparcie', 'generate_link': 'Generuj link', 'starting': 'Uruchamianie...', 'copy': 'Kopiuj', 'stop': 'Zatrzymaj', 'support_hint': 'Podaj ten link pomocy technicznej.',
+        'ngrok_token_label': 'Ngrok Authtoken', 'ngrok_token_help': 'Wymagane. Pobierz za darmo na dashboard.ngrok.com', 'ngrok_missing': 'Brak tokenu. Wpisz go powyżej.'
     },
     'de': {
         'inbox': 'Posteingang', 'sent': 'Gesendet', 'drafts': 'Entwürfe', 'trash': 'Papierkorb', 'spam': 'Spam', 'starred': 'Markiert',
@@ -245,7 +248,8 @@ TRANSLATIONS = {
         'label_created': 'Label erstellt! Wird im Hintergrund auf vorhandene E-Mails angewendet.', 'log_sent': 'Protokoll gesendet!', 'error': 'Fehler',
         'could_not_send': 'Konnte nicht senden', 'could_not_create_folder': 'Konnte Ordner nicht erstellen', 'an_error_occurred': 'Ein Fehler ist aufgetreten.',
         'reply_to': 'Antwort an:', 'forwarding': 'Weiterleiten', 'forwarded_message': '---------- Weitergeleitete Nachricht ----------', 'wrote': 'schrieb', 'reklam': 'Werbung',
-        'remote_support': 'Fernwartung', 'generate_link': 'Link generieren', 'starting': 'Starten...', 'copy': 'Kopieren', 'stop': 'Stopp', 'support_hint': 'Geben Sie diesen Link an den Support weiter.'
+        'remote_support': 'Fernwartung', 'generate_link': 'Link generieren', 'starting': 'Starten...', 'copy': 'Kopieren', 'stop': 'Stopp', 'support_hint': 'Geben Sie diesen Link an den Support weiter.',
+        'ngrok_token_label': 'Ngrok Authtoken', 'ngrok_token_help': 'Erforderlich. Kostenlos unter dashboard.ngrok.com', 'ngrok_missing': 'Authtoken fehlt. Oben eingeben.'
     }
 }
 
@@ -1597,10 +1601,19 @@ def start_support():
         return support_tunnel_url
 
     try:
+        # Konfigurera auth token
+        settings = load_settings()
+        token = settings.get('ngrok_token')
+        if token:
+            ngrok.set_auth_token(token)
+        else:
+            return get_translations().get('ngrok_missing', 'Ngrok Authtoken saknas.')
+
         # Hämta porten som appen körs på
         port = app.config.get('SERVER_PORT', 80)
         # Starta tunnel (http protokoll till lokal port)
-        tunnel = ngrok.connect(port)
+        # Använd 127.0.0.1 för att tvinga IPv4 (löser problem med [::1] connection refused)
+        tunnel = ngrok.connect(f"127.0.0.1:{port}")
         support_tunnel_url = tunnel.public_url
         log_event(f"Remote support startad: {support_tunnel_url}")
         return support_tunnel_url
@@ -1617,6 +1630,15 @@ def stop_support():
         log_event("Remote support avslutad")
         return "OK"
     except Exception as e: return str(e)
+
+@app.route('/api/save_ngrok_token', methods=['POST'])
+def save_ngrok_token():
+    token = request.form.get('token', '').strip()
+    settings = load_settings()
+    settings['ngrok_token'] = token
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(settings, f, indent=4)
+    return "OK"
 
 @app.route('/api/delete_folder', methods=['POST'])
 def delete_folder():
