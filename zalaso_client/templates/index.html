@@ -895,6 +895,8 @@
                                 x-show="!loading && !error"
                                 id="iframe-{{ msg['uid'] }}"
                                 class="mail-frame"
+                                scrolling="no"
+                                style="overflow:hidden"
                                 onload="window.Zalaso.resizeIframe(this)"
                                 sandbox="allow-popups allow-same-origin allow-modals"
                                 srcdoc="<html><head><style>body{font-family:sans-serif;margin:0;padding:25px;line-height:1.6;color:#1f1f1f;background:#fff;overflow-wrap:break-word;word-wrap:break-word;}pre{white-space:pre-wrap;word-wrap:break-word;}img{max-width:100% !important;height:auto !important;border-radius:12px;}</style></head><body>{{ msg['body_html']|replace('\"', '&quot;')|safe }}</body></html>">
