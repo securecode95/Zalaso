@@ -1612,7 +1612,9 @@ def start_support():
         # Hämta porten som appen körs på
         port = app.config.get('SERVER_PORT', 80)
         # Starta tunnel (http protokoll till lokal port)
-        # Använd 127.0.0.1 för att tvinga IPv4 (löser problem med [::1] connection refused)
+        
+        # Använd 127.0.0.1 explicit. Eftersom vi binder till 0.0.0.0 fungerar localhost alltid,
+        # och det undviker problem med IPv6 [::1] eller externa Docker-IPs som blockeras.
         tunnel = ngrok.connect(f"127.0.0.1:{port}")
         support_tunnel_url = tunnel.public_url
         log_event(f"Remote support startad: {support_tunnel_url}")
@@ -2306,7 +2308,8 @@ if __name__ == '__main__':
     
     is_frozen = getattr(sys, 'frozen', False)
     host = '0.0.0.0'
-    debug = not is_frozen
+    # Stäng av debug för att undvika problem med reloader/dubbla processer i Docker + ngrok
+    debug = False
     
     # Försök binda till port 80, annars fall tillbaka till 5000
     port = 80
