@@ -865,6 +865,7 @@
                         <div class="px-6 py-4" x-data="{ 
                             bodyLoaded: {{ 'true' if msg['has_body'] else 'false' }}, 
                             loading: false,
+                            error: null,
                             uid: '{{ msg['uid'] }}',
                             folder: '{{ msg['folder'] }}'
                         }" x-init="if(!bodyLoaded) { 
@@ -879,16 +880,19 @@
                                         iframe.srcdoc = '<html><head><style>body{font-family:sans-serif;margin:0;padding:25px;line-height:1.6;color:#1f1f1f;background:#fff;overflow-wrap:break-word;word-wrap:break-word;}pre{white-space:pre-wrap;word-wrap:break-word;}img{max-width:100% !important;height:auto !important;border-radius:12px;}</style></head><body>'+content+'</body></html>';
                                         bodyLoaded=true; 
                                     } catch(e) { console.error(e); }
-                                } 
+                                } else if(d.error) {
+                                    error = 'Kunde inte hämta innehåll: ' + d.error;
+                                }
                                 loading=false; 
-                            }); 
+                            }).catch(e => { error = 'Nätverksfel'; loading=false; }); 
                         }">
                             <div x-show="loading" class="p-8 text-center text-gray-500 flex flex-col items-center">
                                 <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2"></div>
                                 <span>Laddar innehåll...</span>
                             </div>
+                            <div x-show="error" class="p-8 text-center text-red-500 font-medium" x-text="error"></div>
                             <iframe
-                                x-show="!loading"
+                                x-show="!loading && !error"
                                 id="iframe-{{ msg['uid'] }}"
                                 class="mail-frame"
                                 onload="window.Zalaso.resizeIframe(this)"

@@ -58,6 +58,14 @@ def log_event(message):
                 f.write(f"[{timestamp}] {message}\n")
     except: pass
 
+# Fix för Windows GUI-krasch: Omdirigera print till ingenting om ingen konsol finns
+if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+    class NullWriter:
+        def write(self, text): pass
+        def flush(self): pass
+    sys.stdout = NullWriter()
+    sys.stderr = NullWriter()
+
 # Global felhanterare för att visa fel i webbläsaren (viktigt för .exe)
 @app.errorhandler(Exception)
 def handle_exception(e):
@@ -411,7 +419,7 @@ def parse_folder(name, t):
 DB_FILE = get_data_path('zalaso.db')
 
 def init_db():
-    with sqlite3.connect(DB_FILE) as conn:
+    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
         conn.execute('PRAGMA journal_mode=WAL')
         conn.execute('''CREATE TABLE IF NOT EXISTS emails (
             uid INTEGER, folder TEXT, subject TEXT, sender TEXT, 
@@ -494,7 +502,7 @@ def sync_worker(folder):
                         ad_folder = f.name
 
             server_uids = {int(u) for u in mb.uids()}
-            with sqlite3.connect(DB_FILE) as conn:
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                 # Hämta lokala UIDs och kolla om de har innehåll (html)
                 rows = conn.execute("SELECT uid, length(html) FROM emails WHERE folder=?", (folder,)).fetchall()
                 local_uids = {r[0] for r in rows if r[0] is not None}
@@ -506,7 +514,7 @@ def sync_worker(folder):
             
             to_delete = list(local_uids - server_uids)
             if to_delete:
-                with sqlite3.connect(DB_FILE) as conn:
+                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     conn.executemany("DELETE FROM emails WHERE uid=? AND folder=?", [(u, folder) for u in to_delete])
 
             # FAS 1: Hämta rubriker för ALLA nya mail (Blixtsnabbt)
@@ -514,7 +522,7 @@ def sync_worker(folder):
             to_fetch_headers.sort(reverse=True)
             
             # Hämta regler
-            with sqlite3.connect(DB_FILE) as conn:
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                 db_rules = conn.execute("SELECT keyword, target_folder, check_field FROM rules").fetchall()
                 db_labels = conn.execute("SELECT id, keyword, check_field FROM labels").fetchall()
             
@@ -608,7 +616,7 @@ def sync_worker(folder):
                         log_event(f"Fel vid hämtning av mail (chunk {i}): {e}")
                     
                     if new_rows:
-                        with sqlite3.connect(DB_FILE) as conn:
+                        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                             conn.executemany("INSERT OR REPLACE INTO emails (uid, folder, subject, sender, body, html, date_iso, date_str, attachments, recipients, labels) VALUES (?,?,?,?,?,?,?,?,?,?,?)", new_rows)
                     
                     # Flytta spam
@@ -672,11 +680,10 @@ def sync_worker(folder):
                     except: pass
                     
                     if update_rows:
-                        with sqlite3.connect(DB_FILE) as conn:
+                        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                             conn.executemany("UPDATE emails SET body=?, html=?, attachments=? WHERE uid=? AND folder=?", update_rows)
     except Exception as e:
         log_event(f"Synkroniseringsfel för {folder}: {e}")
-        print(f"Sync error: {e}")
     finally:
         with sync_lock: syncing_folders.remove(folder)
 
@@ -743,7 +750,7 @@ def move_existing_spam(sender):
             # Hitta UIDs som matchar avsändaren
             uids_to_move = []
             # Vi söker i DB först för att få UIDs snabbt
-            with sqlite3.connect(DB_FILE) as conn:
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                 rows = conn.execute("SELECT uid FROM emails WHERE folder='INBOX' AND sender LIKE ?", (f'%{sender}%',)).fetchall()
                 uids_to_move = [str(r[0]) for r in rows]
             
@@ -755,10 +762,10 @@ def move_existing_spam(sender):
                     mb.delete(uids_to_move)
                 
                 # Ta bort från lokal DB (INBOX)
-                with sqlite3.connect(DB_FILE) as conn:
+                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     placeholders = ','.join('?' * len(uids_to_move))
                     conn.execute(f"DELETE FROM emails WHERE folder='INBOX' AND uid IN ({placeholders})", uids_to_move)
-    except Exception as e: print(f"Error moving existing spam: {e}")
+    except Exception as e: log_event(f"Error moving existing spam: {e}")
 
 def move_existing_ads(sender):
     # Flytta befintliga mail från denna avsändare till reklam
@@ -782,7 +789,7 @@ def move_existing_ads(sender):
             
             # Hitta UIDs som matchar avsändaren
             uids_to_move = []
-            with sqlite3.connect(DB_FILE) as conn:
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                 rows = conn.execute("SELECT uid FROM emails WHERE folder='INBOX' AND sender LIKE ?", (f'%{sender}%',)).fetchall()
                 uids_to_move = [str(r[0]) for r in rows]
             
@@ -793,15 +800,15 @@ def move_existing_ads(sender):
                     mb.copy(uids_to_move, ad_folder)
                     mb.delete(uids_to_move)
                 
-                with sqlite3.connect(DB_FILE) as conn:
+                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     placeholders = ','.join('?' * len(uids_to_move))
                     conn.execute(f"DELETE FROM emails WHERE folder='INBOX' AND uid IN ({placeholders})", uids_to_move)
-    except Exception as e: print(f"Error moving existing ads: {e}")
+    except Exception as e: log_event(f"Error moving existing ads: {e}")
 
 def apply_labels_to_all():
     """ Applicera etiketter på alla befintliga mail """
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             db_labels = conn.execute("SELECT id, keyword, check_field FROM labels").fetchall()
             emails = conn.execute("SELECT uid, folder, subject, sender FROM emails").fetchall()
             
@@ -827,7 +834,7 @@ def apply_labels_to_all():
                     if is_match: applied.append(l_id)
                 updates.append((json.dumps(applied), uid, folder))
             conn.executemany("UPDATE emails SET labels=? WHERE uid=? AND folder=?", updates)
-    except Exception as e: print(f"Error applying labels: {e}")
+    except Exception as e: log_event(f"Error applying labels: {e}")
 
 def get_language():
     s = load_settings()
@@ -845,7 +852,7 @@ def require_login():
             init_db()
         else:
             try:
-                with sqlite3.connect(DB_FILE) as conn:
+                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     conn.execute("SELECT 1 FROM emails LIMIT 1")
             except: init_db()
 
@@ -924,7 +931,7 @@ def index():
     # Hämta etikett-definitioner och lista för sidebar
     labels_map = {}
     labels_list = []
-    with sqlite3.connect(DB_FILE) as conn:
+    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
         conn.row_factory = sqlite3.Row
         for r in conn.execute("SELECT * FROM labels ORDER BY name").fetchall():
             labels_list.append(dict(r))
@@ -987,7 +994,7 @@ def index():
                 
                 mails = []
                 if starred_entries:
-                    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+                    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                         conn.row_factory = sqlite3.Row
                         for fldr, uid in starred_entries:
                             try:
@@ -1003,7 +1010,7 @@ def index():
 
             elif query:
                 # Sök i lokal databas (Blixtsnabbt)
-                with sqlite3.connect(DB_FILE, timeout=10) as conn:
+                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     conn.row_factory = sqlite3.Row
                     clean_query = query.replace('"', '').strip()
                     
@@ -1029,7 +1036,7 @@ def index():
             elif folder.startswith('LABEL:'):
                 try:
                     label_id = int(folder.split(':')[1])
-                    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+                    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                         conn.row_factory = sqlite3.Row
                         # Hämta alla mail som har etiketter och filtrera i Python
                         all_labeled = conn.execute("SELECT * FROM emails WHERE labels IS NOT NULL AND labels != '[]' ORDER BY date_iso DESC").fetchall()
@@ -1048,7 +1055,7 @@ def index():
 
             else:
                 # DB fetch for speed (Fix Issue 1 & 3)
-                with sqlite3.connect(DB_FILE, timeout=10) as conn:
+                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     conn.row_factory = sqlite3.Row
                     total = conn.execute("SELECT COUNT(*) FROM emails WHERE folder=? AND uid IS NOT NULL AND uid != 0", (folder,)).fetchone()[0]
                     rows = conn.execute("SELECT * FROM emails WHERE folder=? AND uid IS NOT NULL AND uid != 0 ORDER BY date_iso DESC, uid DESC LIMIT ? OFFSET ?", (folder, per_page, (page-1)*per_page)).fetchall()
@@ -1317,7 +1324,7 @@ def get_message_api(uid):
 
     try:
         # 1. Försök hämta från DB först
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT * FROM emails WHERE uid=? AND folder=?", (uid, folder)).fetchone()
             if row and (row['html'] or row['body']):
@@ -1341,7 +1348,7 @@ def get_message_api(uid):
                      if not a.content_id and not (a.content_disposition == 'inline'):
                         atts_data.append({'filename': a.filename or "noname", 'size': a.size, 'content_type': a.content_type})
                 
-                with sqlite3.connect(DB_FILE) as conn:
+                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     conn.execute("UPDATE emails SET body=?, html=?, attachments=? WHERE uid=? AND folder=?", 
                                 (body_text, body_html, json.dumps(atts_data), uid, folder))
                 
@@ -1349,7 +1356,9 @@ def get_message_api(uid):
                 data['subject'] = msg.subject
                 data['from'] = msg.from_
                 return json.dumps(data)
-
+    except Exception as e:
+        log_event(f"Fel vid hämtning av meddelande {uid}: {e}")
+        return json.dumps({'error': str(e)})
     except Exception as e: return json.dumps({'error': str(e)})
     return json.dumps({'error': 'Not found'})
 
@@ -1361,7 +1370,7 @@ def download_attachment(uid):
     folder = request.args.get('folder', 'INBOX')
     if folder == 'STARRED':
         try:
-            with sqlite3.connect(DB_FILE) as conn:
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                 row = conn.execute("SELECT folder FROM emails WHERE uid=?", (uid,)).fetchone()
                 if row: folder = row[0]
         except: pass
@@ -1411,7 +1420,7 @@ def mark_read(uids):
             mb.flag(uid_list, '\\Seen', True)
             return "OK"
     except Exception as e:
-        print(f"Error marking read: {e}")
+        log_event(f"Error marking read: {e}")
         return "Error"
 
 @app.route('/api/toggle_star/<uid>')
@@ -1497,7 +1506,7 @@ def create_folder():
         threading.Thread(target=subscribe_worker, daemon=True).start()
         return "OK"
     except Exception as e:
-        print(f"Error creating folder: {e}")
+        log_event(f"Error creating folder: {e}")
         return str(e)
 
 @app.route('/api/delete_folder', methods=['POST'])
@@ -1517,7 +1526,7 @@ def delete_folder():
             
         return "OK"
     except Exception as e:
-        print(f"Error deleting folder: {e}")
+        log_event(f"Error deleting folder: {e}")
         return str(e)
 
 @app.route('/api/sync_folders', methods=['POST'])
@@ -1537,7 +1546,7 @@ def mark_unread(uids):
             mb.flag(uid_list, '\\Seen', False)
             return "OK"
     except Exception as e:
-        print(f"Error marking unread: {e}")
+        log_event(f"Error marking unread: {e}")
         return "Error"
 
 @app.route('/api/move_mail', methods=['POST'])
@@ -1565,7 +1574,7 @@ def move_mail():
                 except: pass
             
         # Uppdatera lokal databas: Flytta mailen till nya mappen direkt (visuellt direkt)
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             placeholders = ','.join('?' * len(uid_list))
             # Uppdatera mappen för mailen. Om UID krockar i destinationen, ignorera (tas bort nedan)
             conn.execute(f"UPDATE OR IGNORE emails SET folder=? WHERE folder=? AND uid IN ({placeholders})", [dest, folder] + uid_list)
@@ -1634,11 +1643,11 @@ def delete_mails():
                 # Tvinga servern att utföra raderingen permanent (ta bort mail markerade som \Deleted)
                 try: mb.expunge()
                 except: pass
-    except Exception as e: print(f"IMAP delete error: {e}")
+    except Exception as e: log_event(f"IMAP delete error: {e}")
     
     # Ta bort från lokal databas direkt (även om IMAP misslyckades)
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             placeholders = ','.join('?' * len(uids))
             conn.execute(f"DELETE FROM emails WHERE folder=? AND uid IN ({placeholders})", [folder] + uids)
             
@@ -1670,7 +1679,7 @@ def empty_trash():
                 except: pass
         
         # Rensa databasen
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.execute("DELETE FROM emails WHERE folder=?", (folder,))
             
         return "OK"
@@ -1734,7 +1743,7 @@ def search_suggestions():
     threading.Thread(target=sync_worker, args=(folder,), daemon=True).start()
     
     try:
-        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
             clean_query = query.replace('"', '').strip()
             if not clean_query: return json.dumps([])
@@ -1754,7 +1763,7 @@ def contact_suggestions():
     
     suggestions = []
     try:
-        with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
             
             # 1. Sök i Kontaktboken (Prioriterat)
@@ -1779,11 +1788,11 @@ def handle_contacts():
         name = request.form.get('name', '').strip()
         email = request.form.get('email', '').strip()
         if not email: return "Email required"
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.execute("INSERT OR REPLACE INTO contacts (name, email) VALUES (?, ?)", (name, email))
         return "OK"
     else:
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM contacts ORDER BY name").fetchall()
             return json.dumps([dict(r) for r in rows])
@@ -1791,7 +1800,7 @@ def handle_contacts():
 @app.route('/api/contacts/delete', methods=['POST'])
 def delete_contact():
     id = request.form.get('id')
-    with sqlite3.connect(DB_FILE) as conn:
+    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
         conn.execute("DELETE FROM contacts WHERE id=?", (id,))
     return "OK"
 
@@ -1802,11 +1811,11 @@ def handle_rules():
         folder = request.form.get('folder', '').strip()
         field = request.form.get('field', 'subject').strip()
         if not keyword or not folder: return "Missing args"
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.execute("INSERT INTO rules (keyword, target_folder, check_field) VALUES (?, ?, ?)", (keyword, folder, field))
         return "OK"
     else:
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM rules").fetchall()
             return json.dumps([dict(r) for r in rows])
@@ -1814,7 +1823,7 @@ def handle_rules():
 @app.route('/api/rules/delete', methods=['POST'])
 def delete_rule():
     id = request.form.get('id')
-    with sqlite3.connect(DB_FILE) as conn:
+    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
         conn.execute("DELETE FROM rules WHERE id=?", (id,))
     return "OK"
 
@@ -1826,12 +1835,12 @@ def handle_labels():
         keyword = request.form.get('keyword', '').strip()
         field = request.form.get('field', 'subject').strip()
         if not name or not keyword: return "Missing args"
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.execute("INSERT INTO labels (name, color, keyword, check_field) VALUES (?, ?, ?, ?)", (name, color, keyword, field))
         threading.Thread(target=apply_labels_to_all, daemon=True).start()
         return "OK"
     else:
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM labels").fetchall()
             return json.dumps([dict(r) for r in rows])
@@ -1839,7 +1848,7 @@ def handle_labels():
 @app.route('/api/labels/delete', methods=['POST'])
 def delete_label():
     id = request.form.get('id')
-    with sqlite3.connect(DB_FILE) as conn:
+    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
         conn.execute("DELETE FROM labels WHERE id=?", (id,))
     return "OK"
 
@@ -1851,7 +1860,7 @@ def assign_label():
         if not uids_str: return "No UIDs"
         uids = [u.strip() for u in uids_str.split(',') if u.strip()]
         
-        with sqlite3.connect(DB_FILE) as conn:
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
             placeholders = ','.join('?' * len(uids))
             rows = conn.execute(f"SELECT uid, folder, labels FROM emails WHERE uid IN ({placeholders})", uids).fetchall()
             
@@ -2004,10 +2013,10 @@ def send():
                                     
                                     parts.append(part)
                                 except Exception as e:
-                                    print(f"Error attaching forwarded file {fname}: {e}")
+                                    log_event(f"Error attaching forwarded file {fname}: {e}")
                             
             except Exception as e:
-                print(f"Forward error: {e}")
+                log_event(f"Forward error: {e}")
 
         if 'files' in request.files:
             for f in request.files.getlist('files'):
