@@ -9,6 +9,7 @@ fi
 source venv/bin/activate
 pip install -r requirements.txt
 pip install pyinstaller
+pip install pyngrok
 
 echo "Creating Executable..."
 # Note: Linux uses ':' as separator for add-data, Windows uses ';'

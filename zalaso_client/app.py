@@ -493,6 +493,7 @@ def init_db():
             INSERT INTO emails_fts(rowid, subject, sender, body) VALUES (new.rowid, new.subject, new.sender, new.body);
         END;''')
         conn.execute('''CREATE INDEX IF NOT EXISTS idx_emails_folder_date ON emails(folder, date_iso DESC)''')
+        conn.execute('''CREATE INDEX IF NOT EXISTS idx_emails_labels ON emails(labels)''')
 
 sync_lock = threading.Lock()
 syncing_folders = set()

@@ -7,8 +7,10 @@ if [ ! -d "venv" ]; then
     source venv/bin/activate
     echo "Installing dependencies..."
     pip install -r requirements.txt
+    pip install pyngrok
 else
     source venv/bin/activate
+    pip install pyngrok
 fi
 
 echo "Starting Zalaso Mail..."
