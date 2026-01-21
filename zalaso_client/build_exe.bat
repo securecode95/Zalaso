@@ -2,6 +2,10 @@
 cd /d "%~dp0"
 echo Building Zalaso Mail Executable...
 
+if exist "build" rmdir /s /q "build"
+if exist "dist" rmdir /s /q "dist"
+if exist "ZalasoMail.spec" del "ZalasoMail.spec"
+
 if not exist "venv" (
     python -m venv venv
 )
