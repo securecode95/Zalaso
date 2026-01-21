@@ -260,6 +260,25 @@ def update_local_status(folder, uids, is_read):
     with open(READ_STATUS_FILE, 'w') as f:
         json.dump(data, f)
 
+def update_local_status_batch(folder, updates):
+    data = {}
+    if os.path.exists(READ_STATUS_FILE):
+        try:
+            with open(READ_STATUS_FILE, 'r') as f: data = json.load(f)
+        except: pass
+    
+    if folder not in data: data[folder] = {}
+    
+    changed = False
+    for uid, is_read in updates.items():
+        if data[folder].get(str(uid)) != is_read:
+            data[folder][str(uid)] = is_read
+            changed = True
+            
+    if changed:
+        with open(READ_STATUS_FILE, 'w') as f:
+            json.dump(data, f)
+
 def get_local_status(folder):
     if not os.path.exists(READ_STATUS_FILE): return {}
     try:
@@ -431,6 +450,7 @@ def init_db():
             body TEXT, html TEXT, date_iso TEXT, date_str TEXT, attachments TEXT,
             PRIMARY KEY(uid, folder)
         )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS local_folders (name TEXT PRIMARY KEY)''')
         conn.execute('''CREATE TABLE IF NOT EXISTS contacts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
@@ -472,6 +492,31 @@ def init_db():
 
 sync_lock = threading.Lock()
 syncing_folders = set()
+
+def sync_folder_structure():
+    """ Hämta mappstruktur från servern och spara lokalt (för snabbare laddning) """
+    try:
+        with get_mailbox() as mb:
+            # Loopia-fix: Subscribe
+            try:
+                for f in mb.folder.list():
+                    try: mb.folder.subscribe(f.name)
+                    except: pass
+            except: pass
+
+            folders = list(mb.folder.list())
+            # Ensure Reklam exists
+            if not any('reklam' in f.name.lower() for f in folders):
+                try:
+                    mb.folder.create('INBOX.Reklam')
+                    folders = list(mb.folder.list())
+                except: pass
+            
+            folder_names = [f.name for f in folders]
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+                conn.execute("DELETE FROM local_folders")
+                conn.executemany("INSERT INTO local_folders (name) VALUES (?)", [(n,) for n in folder_names])
+    except Exception as e: log_event(f"Folder sync error: {e}")
 
 def subscribe_worker(folder_names=None):
     """ Bakgrundsjobb för att säkerställa att alla mappar är prenumererade (Loopia-fix) """
@@ -687,6 +732,29 @@ def sync_worker(folder):
                     if update_rows:
                         with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                             conn.executemany("UPDATE emails SET body=?, html=?, attachments=? WHERE uid=? AND folder=?", update_rows)
+            
+            # FAS 3: Synka flaggor (Läst/Stjärnmärkt) för synliga mail i bakgrunden
+            try:
+                recent_uids = sorted(list(local_uids), reverse=True)[:100]
+                if recent_uids:
+                    uid_str = [str(u) for u in recent_uids]
+                    flags_map = {}
+                    # Hämta bara flaggor (snabbt)
+                    for msg in mb.fetch(A(uid=uid_str), ['FLAGS', 'UID']):
+                        flags_map[str(msg.uid)] = msg.flags
+                    
+                    read_updates = {}
+                    star_updates = {}
+                    for uid in uid_str:
+                        flags = flags_map.get(uid, [])
+                        is_read = '\\Seen' in flags
+                        is_starred = '\\Flagged' in flags
+                        read_updates[uid] = is_read
+                        star_updates[uid] = is_starred
+                    
+                    update_local_status_batch(folder, read_updates)
+                    update_star_status_batch(folder, star_updates)
+            except Exception as e: log_event(f"Flag sync error: {e}")
     except Exception as e:
         log_event(f"Synkroniseringsfel för {folder}: {e}")
     finally:
@@ -933,6 +1001,9 @@ def index():
     if folder != 'STARRED':
         threading.Thread(target=sync_worker, args=(folder,), daemon=True).start()
 
+    # Starta mapp-synk i bakgrunden
+    threading.Thread(target=sync_folder_structure, daemon=True).start()
+
     # Hämta etikett-definitioner och lista för sidebar
     labels_map = {}
     labels_list = []
@@ -943,355 +1014,341 @@ def index():
             labels_map[r['id']] = {'name': r['name'], 'color': r['color']}
 
     try:
-        with get_mailbox() as mb:
-            icons_map = get_folder_icons_map()
-            all_folders = list(mb.folder.list())
-            
-            # Automatisk prenumeration på alla mappar vid start (Loopia-fix)
-            if not session.get('folders_subscribed'):
-                threading.Thread(target=subscribe_worker, daemon=True).start()
-                session['folders_subscribed'] = True
-
-            # Säkerställ att Reklam-mappen finns
-            if not any('reklam' in f.name.lower() for f in all_folders):
-                try:
-                    mb.folder.create('INBOX.Reklam')
+        # Hämta mappar från lokal DB istället för IMAP (Mycket snabbare)
+        icons_map = get_folder_icons_map()
+        all_folders = []
+        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+            try:
+                rows = conn.execute("SELECT name FROM local_folders").fetchall()
+                for r in rows:
                     class MockFolder: pass
-                    mf = MockFolder()
-                    mf.name = 'INBOX.Reklam'
-                    all_folders.append(mf)
-                except: pass
+                    f = MockFolder()
+                    f.name = r[0]
+                    all_folders.append(f)
+            except: pass
+        
+        # Fallback: Om inga mappar finns (första körning), hämta synkront
+        if not all_folders:
+            sync_folder_structure()
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+                rows = conn.execute("SELECT name FROM local_folders").fetchall()
+                for r in rows:
+                    class MockFolder: pass
+                    f = MockFolder()
+                    f.name = r[0]
+                    all_folders.append(f)
 
-            for f in all_folders:
-                dname, icon, is_sys, is_img = parse_folder(f.name, t)
-                if f.name in icons_map:
-                    icon = 'folder/' + icons_map[f.name]
-                    is_img = True
-                folders_data.append({'id': f.name, 'name': dname, 'icon': icon, 'is_system': is_sys, 'is_image': is_img})
-            folders_data.sort(key=lambda x: (
-                0 if x['id'] == 'STARRED' else 
-                1 if x['id'].lower() == 'inbox' else 
-                2 if x['is_system'] else 3, 
-                x['name']))
+        for f in all_folders:
+            dname, icon, is_sys, is_img = parse_folder(f.name, t)
+            if f.name in icons_map:
+                icon = 'folder/' + icons_map[f.name]
+                is_img = True
+            folders_data.append({'id': f.name, 'name': dname, 'icon': icon, 'is_system': is_sys, 'is_image': is_img})
+        folders_data.sort(key=lambda x: (
+            0 if x['id'] == 'STARRED' else 
+            1 if x['id'].lower() == 'inbox' else 
+            2 if x['is_system'] else 3, 
+            x['name']))
+        
+        trash_folder_id = None
+        for f in folders_data:
+            if 'trash' in f['id'].lower() or 'papperskorg' in f['id'].lower() or 'bin' in f['id'].lower() or 'deleted' in f['id'].lower():
+                trash_folder_id = f['id']
+                break
+        
+        local_status = get_local_status(folder)
+        star_status = get_star_status(folder)
+        
+        if folder == 'STARRED':
+            # Hämta alla stjärnmärkta mail från alla mappar
+            starred_entries = set()
+            if os.path.exists(STAR_STATUS_FILE):
+                try:
+                    with open(STAR_STATUS_FILE) as f:
+                        all_stars = json.load(f)
+                        for fldr, uids in all_stars.items():
+                            for uid, is_starred in uids.items():
+                                if is_starred:
+                                    try: starred_entries.add((fldr, int(uid)))
+                                    except: pass
+                except: pass
             
-            trash_folder_id = None
-            for f in folders_data:
-                if 'trash' in f['id'].lower() or 'papperskorg' in f['id'].lower() or 'bin' in f['id'].lower() or 'deleted' in f['id'].lower():
-                    trash_folder_id = f['id']
-                    break
+            mails = []
+            if starred_entries:
+                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+                    conn.row_factory = sqlite3.Row
+                    for fldr, uid in starred_entries:
+                        try:
+                            row = conn.execute("SELECT * FROM emails WHERE folder=? AND uid=?", (fldr, uid)).fetchone()
+                            if row:
+                                mails.append(MockMsg(row))
+                        except: pass
             
-            local_status = get_local_status(folder)
-            star_status = get_star_status(folder)
+            mails.sort(key=lambda x: x.date, reverse=True)
             
-            if folder == 'STARRED':
-                # Hämta alla stjärnmärkta mail från alla mappar
-                starred_entries = set()
-                if os.path.exists(STAR_STATUS_FILE):
-                    try:
-                        with open(STAR_STATUS_FILE) as f:
-                            all_stars = json.load(f)
-                            for fldr, uids in all_stars.items():
-                                for uid, is_starred in uids.items():
-                                    if is_starred:
-                                        try: starred_entries.add((fldr, int(uid)))
-                                        except: pass
-                    except: pass
+            total = len(mails)
+            mails = mails[(page-1)*per_page : page*per_page]
+
+        elif query:
+            # Sök i lokal databas (Blixtsnabbt)
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+                conn.row_factory = sqlite3.Row
+                clean_query = query.replace('"', '').strip()
+                
+                if clean_query.startswith('*.'):
+                    # Sökning på bilagor (t.ex. *.pdf)
+                    ext = clean_query[1:]
+                    rows = conn.execute("SELECT * FROM emails WHERE attachments LIKE ? ORDER BY date_iso DESC, uid DESC", (f'%{ext}"%',)).fetchall()
+                else:
+                    # FTS sökning
+                    fts_query = f'{clean_query}*'
+                    rows = conn.execute("SELECT * FROM emails WHERE rowid IN (SELECT rowid FROM emails_fts WHERE emails_fts MATCH ? ORDER BY rank) ORDER BY date_iso DESC, uid DESC", (fts_query,)).fetchall()
                 
                 mails = []
-                if starred_entries:
-                    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
-                        conn.row_factory = sqlite3.Row
-                        for fldr, uid in starred_entries:
-                            try:
-                                row = conn.execute("SELECT * FROM emails WHERE folder=? AND uid=?", (fldr, uid)).fetchone()
-                                if row:
-                                    mails.append(MockMsg(row))
-                            except: pass
-                
-                mails.sort(key=lambda x: x.date, reverse=True)
+                for row in rows:
+                    # Simulera objektstruktur för loopen nedan
+                    m = MockMsg(row)
+                    mails.append(m)
                 
                 total = len(mails)
+                # Paginering för sökresultat
                 mails = mails[(page-1)*per_page : page*per_page]
 
-            elif query:
-                # Sök i lokal databas (Blixtsnabbt)
+        elif folder.startswith('LABEL:'):
+            try:
+                label_id = int(folder.split(':')[1])
                 with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     conn.row_factory = sqlite3.Row
-                    clean_query = query.replace('"', '').strip()
+                    # Hämta alla mail som har etiketter och filtrera i Python
+                    all_labeled = conn.execute("SELECT * FROM emails WHERE labels IS NOT NULL AND labels != '[]' ORDER BY date_iso DESC").fetchall()
                     
-                    if clean_query.startswith('*.'):
-                        # Sökning på bilagor (t.ex. *.pdf)
-                        ext = clean_query[1:]
-                        rows = conn.execute("SELECT * FROM emails WHERE attachments LIKE ? ORDER BY date_iso DESC, uid DESC", (f'%{ext}"%',)).fetchall()
-                    else:
-                        # FTS sökning
-                        fts_query = f'{clean_query}*'
-                        rows = conn.execute("SELECT * FROM emails WHERE rowid IN (SELECT rowid FROM emails_fts WHERE emails_fts MATCH ? ORDER BY rank) ORDER BY date_iso DESC, uid DESC", (fts_query,)).fetchall()
+                    filtered_rows = []
+                    for r in all_labeled:
+                        try:
+                            if label_id in json.loads(r['labels']):
+                                filtered_rows.append(r)
+                        except: pass
                     
-                    mails = []
-                    for row in rows:
-                        # Simulera objektstruktur för loopen nedan
-                        m = MockMsg(row)
-                        mails.append(m)
-                    
-                    total = len(mails)
-                    # Paginering för sökresultat
-                    mails = mails[(page-1)*per_page : page*per_page]
-
-            elif folder.startswith('LABEL:'):
-                try:
-                    label_id = int(folder.split(':')[1])
-                    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
-                        conn.row_factory = sqlite3.Row
-                        # Hämta alla mail som har etiketter och filtrera i Python
-                        all_labeled = conn.execute("SELECT * FROM emails WHERE labels IS NOT NULL AND labels != '[]' ORDER BY date_iso DESC").fetchall()
-                        
-                        filtered_rows = []
-                        for r in all_labeled:
-                            try:
-                                if label_id in json.loads(r['labels']):
-                                    filtered_rows.append(r)
-                            except: pass
-                        
-                        total = len(filtered_rows)
-                        rows = filtered_rows[(page-1)*per_page : page*per_page]
-                        mails = [MockMsg(row) for row in rows]
-                except: mails = []
-
-            else:
-                # DB fetch for speed (Fix Issue 1 & 3)
-                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
-                    conn.row_factory = sqlite3.Row
-                    total = conn.execute("SELECT COUNT(*) FROM emails WHERE folder=? AND uid IS NOT NULL AND uid != 0", (folder,)).fetchone()[0]
-                    rows = conn.execute("SELECT * FROM emails WHERE folder=? AND uid IS NOT NULL AND uid != 0 ORDER BY date_iso DESC, uid DESC LIMIT ? OFFSET ?", (folder, per_page, (page-1)*per_page)).fetchall()
+                    total = len(filtered_rows)
+                    rows = filtered_rows[(page-1)*per_page : page*per_page]
                     mails = [MockMsg(row) for row in rows]
+            except: mails = []
+
+        else:
+            # DB fetch for speed (Fix Issue 1 & 3)
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+                conn.row_factory = sqlite3.Row
+                total = conn.execute("SELECT COUNT(*) FROM emails WHERE folder=? AND uid IS NOT NULL AND uid != 0", (folder,)).fetchone()[0]
+                rows = conn.execute("SELECT * FROM emails WHERE folder=? AND uid IS NOT NULL AND uid != 0 ORDER BY date_iso DESC, uid DESC LIMIT ? OFFSET ?", (folder, per_page, (page-1)*per_page)).fetchall()
+                mails = [MockMsg(row) for row in rows]
+
+        months_sv = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"]
+        # Svensk tidszon (UTC+1) för att fixa 1 timmes felvisning
+        swe_tz = timezone(timedelta(hours=1))
+        now = datetime.now(swe_tz)
+
+        threads = {}
+        for msg in mails:
+            sender = msg.from_ or "Okänd"
+            
+            if 'sent' in folder.lower() or 'skickat' in folder.lower():
+                if hasattr(msg, 'recipients') and msg.recipients:
+                    sender = f"Till: {msg.recipients}"
+                full_sender = sender
+            else:
+                full_sender = sender
+                email_address = ""
                 
-                # Sync flags from IMAP for accuracy (Background check)
-                if mails and folder != 'STARRED':
+                # Extrahera namn och e-post
+                if '<' in sender and '>' in sender:
                     try:
-                        mb.folder.set(folder)
-                        uids = [str(m.uid) for m in mails]
-                        flags_map = {}
-                        # Quick fetch of flags only
-                        for msg in mb.fetch(A(uid=uids), headers_only=True, bulk=True):
-                            flags_map[str(msg.uid)] = msg.flags
+                        parts = sender.split('<')
+                        name_part = parts[0].strip().replace('"', '')
+                        email_address = parts[1].strip('>').strip()
+                        sender = name_part if name_part else email_address
+                    except: 
+                        email_address = sender
+                else:
+                    email_address = sender
+
+                # Förbättra namnet om det är generiskt (t.ex. "Info" -> "Företagsnamn")
+                if '@' in email_address:
+                    try:
+                        local_part, domain = email_address.split('@')
+                        generic_names = ['info', 'kontakt', 'contact', 'support', 'admin', 'noreply', 'no-reply', 'hello', 'hej', 'order', 'sales', 'salj', 'faktura', 'invoice', 'team', 'nyhetsbrev', 'kundservice', 'kundtjanst']
                         
-                        batch_stars = {}
-                        for m in mails:
-                            if str(m.uid) in flags_map:
-                                m.flags = flags_map[str(m.uid)]
-                                is_starred = '\\Flagged' in m.flags
-                                batch_stars[str(m.uid)] = is_starred
-                        update_star_status_batch(folder, batch_stars)
+                        current_name_lower = sender.lower().strip()
+                        is_generic = (current_name_lower in generic_names) or \
+                                     (current_name_lower == local_part.lower() and local_part.lower() in generic_names) or \
+                                     (current_name_lower == email_address.lower() and local_part.lower() in generic_names)
+
+                        if is_generic:
+                            # Använd domänen som namn (t.ex. loopia.se -> Loopia)
+                            domain_parts = domain.split('.')
+                            if len(domain_parts) >= 2:
+                                company_name = domain_parts[0].title()
+                                # Undvik subdomäner som 'mail', 'smtp'
+                                if company_name.lower() in ['mail', 'smtp', 'webmail'] and len(domain_parts) > 2:
+                                    company_name = domain_parts[1].title()
+                                sender = company_name
+                        elif sender == email_address:
+                            # Snygga till local part om inget namn fanns
+                            sender = local_part.replace('.', ' ').replace('_', ' ').title()
                     except: pass
 
-            months_sv = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"]
-            # Svensk tidszon (UTC+1) för att fixa 1 timmes felvisning
-            swe_tz = timezone(timedelta(hours=1))
-            now = datetime.now(swe_tz)
+            clean_subj = (msg.subject or "Inget ämne").replace('Re: ','').replace('Sv: ','').strip()
+            
+            # Logik för trådning:
+            # Separera utkast och mail utan ämne för att undvika problem med radering
+            is_draft = 'draft' in folder.lower() or 'utkast' in folder.lower()
+            has_no_subject = not msg.subject or not msg.subject.strip()
+            
+            if is_draft or has_no_subject:
+                unique_key = f"{msg.uid}_{getattr(msg, 'original_folder', folder)}"
+                tid = hashlib.md5(unique_key.encode()).hexdigest()
+            else:
+                thread_key = f"{clean_subj}-{sender}"
+                tid = hashlib.md5(thread_key.encode()).hexdigest()
 
-            threads = {}
-            for msg in mails:
-                sender = msg.from_ or "Okänd"
-                
-                if 'sent' in folder.lower() or 'skickat' in folder.lower():
-                    if hasattr(msg, 'recipients') and msg.recipients:
-                        sender = f"Till: {msg.recipients}"
-                    full_sender = sender
-                else:
-                    full_sender = sender
-                    email_address = ""
-                    
-                    # Extrahera namn och e-post
-                    if '<' in sender and '>' in sender:
+            if tid not in threads: threads[tid] = {'subject': clean_subj, 'msgs': [], 'unread': False, 'starred': False, 'thread_attachments': [], 'labels': set()}
+
+            # Hantera MockMsg (från DB) vs IMAP Message
+            if hasattr(msg, 'attachments_data'):
+                body_html = msg.html
+                if not body_html and msg.text:
+                    body_html = f"<pre>{msg.text}</pre>"
+                atts = msg.attachments_data
+            else:
+                # Fallback för direkta IMAP-objekt (om det skulle användas)
+                body_html = msg.html or f"<pre>{msg.text}</pre>"
+                for att in msg.attachments:
+                    if att.content_id:
                         try:
-                            parts = sender.split('<')
-                            name_part = parts[0].strip().replace('"', '')
-                            email_address = parts[1].strip('>').strip()
-                            sender = name_part if name_part else email_address
-                        except: 
-                            email_address = sender
-                    else:
-                        email_address = sender
-
-                    # Förbättra namnet om det är generiskt (t.ex. "Info" -> "Företagsnamn")
-                    if '@' in email_address:
-                        try:
-                            local_part, domain = email_address.split('@')
-                            generic_names = ['info', 'kontakt', 'contact', 'support', 'admin', 'noreply', 'no-reply', 'hello', 'hej', 'order', 'sales', 'salj', 'faktura', 'invoice', 'team', 'nyhetsbrev', 'kundservice', 'kundtjanst']
-                            
-                            current_name_lower = sender.lower().strip()
-                            is_generic = (current_name_lower in generic_names) or \
-                                         (current_name_lower == local_part.lower() and local_part.lower() in generic_names) or \
-                                         (current_name_lower == email_address.lower() and local_part.lower() in generic_names)
-
-                            if is_generic:
-                                # Använd domänen som namn (t.ex. loopia.se -> Loopia)
-                                domain_parts = domain.split('.')
-                                if len(domain_parts) >= 2:
-                                    company_name = domain_parts[0].title()
-                                    # Undvik subdomäner som 'mail', 'smtp'
-                                    if company_name.lower() in ['mail', 'smtp', 'webmail'] and len(domain_parts) > 2:
-                                        company_name = domain_parts[1].title()
-                                    sender = company_name
-                            elif sender == email_address:
-                                # Snygga till local part om inget namn fanns
-                                sender = local_part.replace('.', ' ').replace('_', ' ').title()
+                            b64_data = base64.b64encode(att.payload).decode('utf-8')
+                            body_html = body_html.replace(f"cid:{att.content_id.strip('<>')}", f"data:{att.content_type};base64,{b64_data}")
                         except: pass
+                atts = [{'filename': a.filename or "noname", 'size': a.size, 'content_type': a.content_type} for a in msg.attachments]
 
-                clean_subj = (msg.subject or "Inget ämne").replace('Re: ','').replace('Sv: ','').strip()
-                
-                # Logik för trådning:
-                # Separera utkast och mail utan ämne för att undvika problem med radering
-                is_draft = 'draft' in folder.lower() or 'utkast' in folder.lower()
-                has_no_subject = not msg.subject or not msg.subject.strip()
-                
-                if is_draft or has_no_subject:
-                    unique_key = f"{msg.uid}_{getattr(msg, 'original_folder', folder)}"
-                    tid = hashlib.md5(unique_key.encode()).hexdigest()
+            # Filtrera bort bilder från visning (för befintliga mail i DB)
+            atts = [a for a in atts if not (a.get('content_type') or '').lower().startswith('image/')]
+
+            # Använd body_html för safe_body för att behålla formatering i Svara/Vidarebefordra
+            # Vi rensar script för säkerhet i editorn
+            safe_html = body_html
+            if safe_html:
+                safe_html = re.sub(r'<script[^>]*>.*?</script>', '', safe_html, flags=re.DOTALL|re.IGNORECASE)
+            else:
+                # Fallback till text med radbrytningar om ingen HTML finns
+                safe_html = (msg.text or "").replace('\n', '<br>')
+
+            safe_body = base64.b64encode((safe_html or "").encode('utf-8', 'ignore')).decode('utf-8')
+
+            # Datumformatering likt Gmail
+            date_str = ""
+            if msg.date and msg.date.year > 1970:
+                # Säkerställ tidszon och konvertera till svensk tid
+                d = msg.date
+                if d.tzinfo is None:
+                    d = d.replace(tzinfo=timezone.utc)
+                local_date = d.astimezone(swe_tz)
+
+                if local_date.date() == now.date():
+                    date_str = local_date.strftime('%H:%M')
+                elif local_date.year == now.year:
+                    date_str = f"{months_sv[local_date.month-1]} {local_date.day}"
                 else:
-                    thread_key = f"{clean_subj}-{sender}"
-                    tid = hashlib.md5(thread_key.encode()).hexdigest()
+                    date_str = local_date.strftime('%Y-%m-%d')
 
-                if tid not in threads: threads[tid] = {'subject': clean_subj, 'msgs': [], 'unread': False, 'starred': False, 'thread_attachments': [], 'labels': set()}
+            # Kolla lokal status. Om den inte finns, anta att mailet är oläst (första gången).
+            # För STARRED måste vi kolla status i originalmappen
+            check_folder = getattr(msg, 'original_folder', folder)
+            check_status = get_local_status(check_folder)
+            
+            if str(msg.uid) in check_status:
+                is_read = check_status[str(msg.uid)]
+            else:
+                is_read = False
 
-                # Hantera MockMsg (från DB) vs IMAP Message
-                if hasattr(msg, 'attachments_data'):
-                    body_html = msg.html
-                    if not body_html and msg.text:
-                        body_html = f"<pre>{msg.text}</pre>"
-                    atts = msg.attachments_data
+            if not is_read: threads[tid]['unread'] = True
+
+            # Hantera stjärnstatus
+            is_starred = False
+            if hasattr(msg, 'flags') and '\\Flagged' in msg.flags: is_starred = True
+            
+            # För STARRED är allt per definition stjärnmärkt, annars kolla status
+            if folder == 'STARRED':
+                is_starred = True
+            elif str(msg.uid) in star_status: 
+                is_starred = star_status[str(msg.uid)]
+            
+            if is_starred: threads[tid]['starred'] = True
+
+            threads[tid]['msgs'].append({
+                'uid': str(msg.uid),
+                'folder': getattr(msg, 'original_folder', folder),
+                'from': sender,
+                'from_full': full_sender,
+                'date': date_str,
+                'body_html': body_html,
+                'body_safe': safe_body,
+                'has_body': bool(body_html or safe_body),
+                'attachments': atts
+            })
+
+            for l in msg.labels:
+                threads[tid]['labels'].add(l)
+
+            # Samla unika bilagor för tråden (för inkorgs-vyn)
+            # Prioritera bilagor med storlek > 0 om dubbletter finns (t.ex. vid svar)
+            for att in atts:
+                existing_idx = next((i for i, a in enumerate(threads[tid]['thread_attachments']) if a['filename'] == att['filename']), -1)
+                if existing_idx == -1:
+                    a_copy = att.copy()
+                    a_copy['uid'] = str(msg.uid)
+                    a_copy['folder'] = getattr(msg, 'original_folder', folder)
+                    threads[tid]['thread_attachments'].append(a_copy)
                 else:
-                    # Fallback för direkta IMAP-objekt (om det skulle användas)
-                    body_html = msg.html or f"<pre>{msg.text}</pre>"
-                    for att in msg.attachments:
-                        if att.content_id:
-                            try:
-                                b64_data = base64.b64encode(att.payload).decode('utf-8')
-                                body_html = body_html.replace(f"cid:{att.content_id.strip('<>')}", f"data:{att.content_type};base64,{b64_data}")
-                            except: pass
-                    atts = [{'filename': a.filename or "noname", 'size': a.size, 'content_type': a.content_type} for a in msg.attachments]
-
-                # Filtrera bort bilder från visning (för befintliga mail i DB)
-                atts = [a for a in atts if not (a.get('content_type') or '').lower().startswith('image/')]
-
-                # Använd body_html för safe_body för att behålla formatering i Svara/Vidarebefordra
-                # Vi rensar script för säkerhet i editorn
-                safe_html = body_html
-                if safe_html:
-                    safe_html = re.sub(r'<script[^>]*>.*?</script>', '', safe_html, flags=re.DOTALL|re.IGNORECASE)
-                else:
-                    # Fallback till text med radbrytningar om ingen HTML finns
-                    safe_html = (msg.text or "").replace('\n', '<br>')
-
-                safe_body = base64.b64encode((safe_html or "").encode('utf-8', 'ignore')).decode('utf-8')
-
-                # Datumformatering likt Gmail
-                date_str = ""
-                if msg.date and msg.date.year > 1970:
-                    # Säkerställ tidszon och konvertera till svensk tid
-                    d = msg.date
-                    if d.tzinfo is None:
-                        d = d.replace(tzinfo=timezone.utc)
-                    local_date = d.astimezone(swe_tz)
-
-                    if local_date.date() == now.date():
-                        date_str = local_date.strftime('%H:%M')
-                    elif local_date.year == now.year:
-                        date_str = f"{months_sv[local_date.month-1]} {local_date.day}"
-                    else:
-                        date_str = local_date.strftime('%Y-%m-%d')
-
-                # Kolla lokal status. Om den inte finns, anta att mailet är oläst (första gången).
-                # För STARRED måste vi kolla status i originalmappen
-                check_folder = getattr(msg, 'original_folder', folder)
-                check_status = get_local_status(check_folder)
-                
-                if str(msg.uid) in check_status:
-                    is_read = check_status[str(msg.uid)]
-                else:
-                    is_read = False
-
-                if not is_read: threads[tid]['unread'] = True
-
-                # Hantera stjärnstatus
-                is_starred = False
-                if hasattr(msg, 'flags') and '\\Flagged' in msg.flags: is_starred = True
-                
-                # För STARRED är allt per definition stjärnmärkt, annars kolla status
-                if folder == 'STARRED':
-                    is_starred = True
-                elif str(msg.uid) in star_status: 
-                    is_starred = star_status[str(msg.uid)]
-                
-                if is_starred: threads[tid]['starred'] = True
-
-                threads[tid]['msgs'].append({
-                    'uid': str(msg.uid),
-                    'folder': getattr(msg, 'original_folder', folder),
-                    'from': sender,
-                    'from_full': full_sender,
-                    'date': date_str,
-                    'body_html': body_html,
-                    'body_safe': safe_body,
-                    'has_body': bool(body_html or safe_body),
-                    'attachments': atts
-                })
-
-                for l in msg.labels:
-                    threads[tid]['labels'].add(l)
-
-                # Samla unika bilagor för tråden (för inkorgs-vyn)
-                # Prioritera bilagor med storlek > 0 om dubbletter finns (t.ex. vid svar)
-                for att in atts:
-                    existing_idx = next((i for i, a in enumerate(threads[tid]['thread_attachments']) if a['filename'] == att['filename']), -1)
-                    if existing_idx == -1:
+                    if threads[tid]['thread_attachments'][existing_idx].get('size', 0) == 0 and att.get('size', 0) > 0:
                         a_copy = att.copy()
                         a_copy['uid'] = str(msg.uid)
                         a_copy['folder'] = getattr(msg, 'original_folder', folder)
-                        threads[tid]['thread_attachments'].append(a_copy)
-                    else:
-                        if threads[tid]['thread_attachments'][existing_idx].get('size', 0) == 0 and att.get('size', 0) > 0:
-                            a_copy = att.copy()
-                            a_copy['uid'] = str(msg.uid)
-                            a_copy['folder'] = getattr(msg, 'original_folder', folder)
-                            threads[tid]['thread_attachments'][existing_idx] = a_copy
+                        threads[tid]['thread_attachments'][existing_idx] = a_copy
+        
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        
+        start_idx = (page - 1) * per_page + 1 if total > 0 else 0
+        end_idx = min(page * per_page, total)
+        
+        base_url = url_for("index", folder=folder, q=query)
+        
+        pagination_html = '<div class="flex items-center justify-end gap-2 text-sm text-gray-600 my-2">'
+        pagination_html += f'<span class="mr-2">{start_idx}-{end_idx} av {total}</span>'
+        
+        if page > 1:
+            prev_url = url_for("index", folder=folder, page=page-1, q=query)
+            pagination_html += f'<a href="{prev_url}" class="p-1.5 hover:bg-gray-100 rounded-full text-gray-600 transition" title="Föregående"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" /></svg></a>'
+        else:
+            pagination_html += '<span class="p-1.5 text-gray-300 cursor-not-allowed"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" /></svg></span>'
+        
+        # Input för sidnummer
+        pagination_html += f'''
+        <div class="flex items-center gap-1 mx-1">
+            <input type="number" value="{page}" min="1" max="{total_pages}" 
+                   class="w-12 p-1 text-center border border-gray-300 rounded text-xs focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                   onkeydown="if(event.key==='Enter'){{ window.location.href='{base_url}&page='+this.value; }}">
+            <span class="text-gray-400 text-xs">/ {total_pages}</span>
+        </div>
+        '''
             
-            total_pages = max(1, (total + per_page - 1) // per_page)
-            
-            start_idx = (page - 1) * per_page + 1 if total > 0 else 0
-            end_idx = min(page * per_page, total)
-            
-            base_url = url_for("index", folder=folder, q=query)
-            
-            pagination_html = '<div class="flex items-center justify-end gap-2 text-sm text-gray-600 my-2">'
-            pagination_html += f'<span class="mr-2">{start_idx}-{end_idx} av {total}</span>'
-            
-            if page > 1:
-                prev_url = url_for("index", folder=folder, page=page-1, q=query)
-                pagination_html += f'<a href="{prev_url}" class="p-1.5 hover:bg-gray-100 rounded-full text-gray-600 transition" title="Föregående"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" /></svg></a>'
-            else:
-                pagination_html += '<span class="p-1.5 text-gray-300 cursor-not-allowed"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" /></svg></span>'
-            
-            # Input för sidnummer
-            pagination_html += f'''
-            <div class="flex items-center gap-1 mx-1">
-                <input type="number" value="{page}" min="1" max="{total_pages}" 
-                       class="w-12 p-1 text-center border border-gray-300 rounded text-xs focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
-                       onkeydown="if(event.key==='Enter'){{ window.location.href='{base_url}&page='+this.value; }}">
-                <span class="text-gray-400 text-xs">/ {total_pages}</span>
-            </div>
-            '''
-                
-            if page < total_pages:
-                next_url = url_for("index", folder=folder, page=page+1, q=query)
-                pagination_html += f'<a href="{next_url}" class="p-1.5 hover:bg-gray-100 rounded-full text-gray-600 transition" title="Nästa"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg></a>'
-            else:
-                pagination_html += '<span class="p-1.5 text-gray-300 cursor-not-allowed"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg></span>'
-            
-            pagination_html += '</div>'
-            
-            return render_template('index.html', threads=threads, folders=folders_data, current_folder=folder, current_page=page, total_pages=total_pages, pagination_html=pagination_html, settings=settings, query=query, is_trash=is_trash, trash_folder_id=trash_folder_id, labels_map=labels_map, labels_list=labels_list, t=t, lang=lang)
+        if page < total_pages:
+            next_url = url_for("index", folder=folder, page=page+1, q=query)
+            pagination_html += f'<a href="{next_url}" class="p-1.5 hover:bg-gray-100 rounded-full text-gray-600 transition" title="Nästa"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg></a>'
+        else:
+            pagination_html += '<span class="p-1.5 text-gray-300 cursor-not-allowed"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" /></svg></span>'
+        
+        pagination_html += '</div>'
+        
+        return render_template('index.html', threads=threads, folders=folders_data, current_folder=folder, current_page=page, total_pages=total_pages, pagination_html=pagination_html, settings=settings, query=query, is_trash=is_trash, trash_folder_id=trash_folder_id, labels_map=labels_map, labels_list=labels_list, t=t, lang=lang)
     except Exception as e:
         return render_template('index.html', threads={}, folders=folders_data, current_folder=folder, error=str(e), settings=settings, query=query, trash_folder_id=None, labels_map={}, labels_list=labels_list, t=t, lang=lang)
 
@@ -1459,6 +1516,7 @@ def toggle_star(uid):
 @app.route('/api/create_folder', methods=['POST'])
 def create_folder():
     name = request.form.get('name', '').strip()
+    # Uppdatera lokal mapp-cache efter skapande
     icon = request.form.get('icon')
     if not name: return "No name"
     
@@ -1508,6 +1566,7 @@ def create_folder():
         time.sleep(1.0) # Ge servern tid att registrera mappen
         
         # Kör en full prenumerations-synk i bakgrunden för säkerhets skull
+        threading.Thread(target=sync_folder_structure, daemon=True).start()
         threading.Thread(target=subscribe_worker, daemon=True).start()
         return "OK"
     except Exception as e:
@@ -1561,6 +1620,8 @@ def delete_folder():
         if name in icons:
             del icons[name]
             with open(FOLDER_ICONS_FILE, 'w') as f: json.dump(icons, f)
+        
+        threading.Thread(target=sync_folder_structure, daemon=True).start()
             
         return "OK"
     except Exception as e:
