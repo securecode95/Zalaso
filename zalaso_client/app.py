@@ -118,7 +118,8 @@ TRANSLATIONS = {
         'fill_imap': 'Fyll i alla IMAP-fält först.', 'unsaved_changes': 'Du har osparade ändringar.',
         'label_created': 'Etikett skapad! Appliceras på befintliga mail i bakgrunden.', 'log_sent': 'Logg skickad!', 'error': 'Fel',
         'could_not_send': 'Kunde inte skicka', 'could_not_create_folder': 'Kunde inte skapa mapp', 'an_error_occurred': 'Ett fel inträffade.',
-        'reply_to': 'Svarar till:', 'forwarding': 'Vidarebefordra', 'forwarded_message': '---------- Vidarebefordrat meddelande ----------', 'wrote': 'skrev', 'reklam': 'Reklam'
+        'reply_to': 'Svarar till:', 'forwarding': 'Vidarebefordra', 'forwarded_message': '---------- Vidarebefordrat meddelande ----------', 'wrote': 'skrev', 'reklam': 'Reklam',
+        'remote_support': 'Fjärrsupport', 'generate_link': 'Generera länk', 'starting': 'Startar...', 'copy': 'Kopiera', 'stop': 'Avsluta', 'support_hint': 'Ge denna länk till supporten.'
     },
     'en': {
         'inbox': 'Inbox', 'sent': 'Sent', 'drafts': 'Drafts', 'trash': 'Trash', 'spam': 'Spam', 'starred': 'Starred',
@@ -159,7 +160,8 @@ TRANSLATIONS = {
         'fill_imap': 'Fill in all IMAP fields first.', 'unsaved_changes': 'You have unsaved changes.',
         'label_created': 'Label created! Applying to existing emails in background.', 'log_sent': 'Log sent!', 'error': 'Error',
         'could_not_send': 'Could not send', 'could_not_create_folder': 'Could not create folder', 'an_error_occurred': 'An error occurred.',
-        'reply_to': 'Replying to:', 'forwarding': 'Forwarding', 'forwarded_message': '---------- Forwarded message ----------', 'wrote': 'wrote', 'reklam': 'Ads'
+        'reply_to': 'Replying to:', 'forwarding': 'Forwarding', 'forwarded_message': '---------- Forwarded message ----------', 'wrote': 'wrote', 'reklam': 'Ads',
+        'remote_support': 'Remote Support', 'generate_link': 'Generate Link', 'starting': 'Starting...', 'copy': 'Copy', 'stop': 'Stop', 'support_hint': 'Give this link to support.'
     },
     'pl': {
         'inbox': 'Odebrane', 'sent': 'Wysłane', 'drafts': 'Wersje robocze', 'trash': 'Kosz', 'spam': 'Spam', 'starred': 'Oznaczone gwiazdką',
@@ -200,7 +202,8 @@ TRANSLATIONS = {
         'fill_imap': 'Najpierw wypełnij wszystkie pola IMAP.', 'unsaved_changes': 'Masz niezapisane zmiany.',
         'label_created': 'Etykieta utworzona! Stosowanie do istniejących wiadomości w tle.', 'log_sent': 'Log wysłany!', 'error': 'Błąd',
         'could_not_send': 'Nie można wysłać', 'could_not_create_folder': 'Nie można utworzyć folderu', 'an_error_occurred': 'Wystąpił błąd.',
-        'reply_to': 'Odpowiedź do:', 'forwarding': 'Przekazywanie', 'forwarded_message': '---------- Przekazana wiadomość ----------', 'wrote': 'napisał(a)', 'reklam': 'Reklamy'
+        'reply_to': 'Odpowiedź do:', 'forwarding': 'Przekazywanie', 'forwarded_message': '---------- Przekazana wiadomość ----------', 'wrote': 'napisał(a)', 'reklam': 'Reklamy',
+        'remote_support': 'Zdalne wsparcie', 'generate_link': 'Generuj link', 'starting': 'Uruchamianie...', 'copy': 'Kopiuj', 'stop': 'Zatrzymaj', 'support_hint': 'Podaj ten link pomocy technicznej.'
     },
     'de': {
         'inbox': 'Posteingang', 'sent': 'Gesendet', 'drafts': 'Entwürfe', 'trash': 'Papierkorb', 'spam': 'Spam', 'starred': 'Markiert',
@@ -241,7 +244,8 @@ TRANSLATIONS = {
         'fill_imap': 'Bitte füllen Sie zuerst alle IMAP-Felder aus.', 'unsaved_changes': 'Sie haben ungespeicherte Änderungen.',
         'label_created': 'Label erstellt! Wird im Hintergrund auf vorhandene E-Mails angewendet.', 'log_sent': 'Protokoll gesendet!', 'error': 'Fehler',
         'could_not_send': 'Konnte nicht senden', 'could_not_create_folder': 'Konnte Ordner nicht erstellen', 'an_error_occurred': 'Ein Fehler ist aufgetreten.',
-        'reply_to': 'Antwort an:', 'forwarding': 'Weiterleiten', 'forwarded_message': '---------- Weitergeleitete Nachricht ----------', 'wrote': 'schrieb', 'reklam': 'Werbung'
+        'reply_to': 'Antwort an:', 'forwarding': 'Weiterleiten', 'forwarded_message': '---------- Weitergeleitete Nachricht ----------', 'wrote': 'schrieb', 'reklam': 'Werbung',
+        'remote_support': 'Fernwartung', 'generate_link': 'Link generieren', 'starting': 'Starten...', 'copy': 'Kopieren', 'stop': 'Stopp', 'support_hint': 'Geben Sie diesen Link an den Support weiter.'
     }
 }
 
@@ -1120,18 +1124,25 @@ def index():
                 with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     conn.row_factory = sqlite3.Row
                     # Hämta alla mail som har etiketter och filtrera i Python
-                    all_labeled = conn.execute("SELECT * FROM emails WHERE labels IS NOT NULL AND labels != '[]' ORDER BY date_iso DESC").fetchall()
+                    # Optimering: Hämta bara metadata först för att filtrera snabbt
+                    all_labeled = conn.execute("SELECT uid, labels, date_iso FROM emails WHERE labels IS NOT NULL AND labels != '[]' ORDER BY date_iso DESC").fetchall()
                     
-                    filtered_rows = []
+                    filtered_uids = []
                     for r in all_labeled:
                         try:
                             if label_id in json.loads(r['labels']):
-                                filtered_rows.append(r)
+                                filtered_uids.append(r['uid'])
                         except: pass
                     
-                    total = len(filtered_rows)
-                    rows = filtered_rows[(page-1)*per_page : page*per_page]
-                    mails = [MockMsg(row) for row in rows]
+                    total = len(filtered_uids)
+                    page_uids = filtered_uids[(page-1)*per_page : page*per_page]
+                    
+                    if page_uids:
+                        placeholders = ','.join('?' * len(page_uids))
+                        rows = conn.execute(f"SELECT * FROM emails WHERE uid IN ({placeholders})", page_uids).fetchall()
+                        rows.sort(key=lambda x: x['date_iso'] or '', reverse=True)
+                        mails = [MockMsg(row) for row in rows]
+                    else: mails = []
             except: mails = []
 
         else:
