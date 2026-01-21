@@ -921,11 +921,14 @@ def index():
     if folder != 'STARRED':
         threading.Thread(target=sync_worker, args=(folder,), daemon=True).start()
 
-    # Hämta etikett-definitioner
+    # Hämta etikett-definitioner och lista för sidebar
     labels_map = {}
+    labels_list = []
     with sqlite3.connect(DB_FILE) as conn:
-        for r in conn.execute("SELECT * FROM labels").fetchall():
-            labels_map[r[0]] = {'name': r[1], 'color': r[2]}
+        conn.row_factory = sqlite3.Row
+        for r in conn.execute("SELECT * FROM labels ORDER BY name").fetchall():
+            labels_list.append(dict(r))
+            labels_map[r['id']] = {'name': r['name'], 'color': r['color']}
 
     try:
         with get_mailbox() as mb:
@@ -1022,6 +1025,26 @@ def index():
                     total = len(mails)
                     # Paginering för sökresultat
                     mails = mails[(page-1)*per_page : page*per_page]
+
+            elif folder.startswith('LABEL:'):
+                try:
+                    label_id = int(folder.split(':')[1])
+                    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+                        conn.row_factory = sqlite3.Row
+                        # Hämta alla mail som har etiketter och filtrera i Python
+                        all_labeled = conn.execute("SELECT * FROM emails WHERE labels IS NOT NULL AND labels != '[]' ORDER BY date_iso DESC").fetchall()
+                        
+                        filtered_rows = []
+                        for r in all_labeled:
+                            try:
+                                if label_id in json.loads(r['labels']):
+                                    filtered_rows.append(r)
+                            except: pass
+                        
+                        total = len(filtered_rows)
+                        rows = filtered_rows[(page-1)*per_page : page*per_page]
+                        mails = [MockMsg(row) for row in rows]
+                except: mails = []
 
             else:
                 # DB fetch for speed (Fix Issue 1 & 3)
@@ -1199,6 +1222,7 @@ def index():
                     'date': date_str,
                     'body_html': body_html,
                     'body_safe': safe_body,
+                    'has_body': bool(body_html or safe_body),
                     'attachments': atts
                 })
 
@@ -1255,47 +1279,77 @@ def index():
             
             pagination_html += '</div>'
             
-            return render_template('index.html', threads=threads, folders=folders_data, current_folder=folder, current_page=page, total_pages=total_pages, pagination_html=pagination_html, settings=settings, query=query, is_trash=is_trash, trash_folder_id=trash_folder_id, labels_map=labels_map, t=t, lang=lang)
+            return render_template('index.html', threads=threads, folders=folders_data, current_folder=folder, current_page=page, total_pages=total_pages, pagination_html=pagination_html, settings=settings, query=query, is_trash=is_trash, trash_folder_id=trash_folder_id, labels_map=labels_map, labels_list=labels_list, t=t, lang=lang)
     except Exception as e:
-        return render_template('index.html', threads={}, folders=folders_data, current_folder=folder, error=str(e), settings=settings, query=query, trash_folder_id=None, labels_map={}, t=t, lang=lang)
+        return render_template('index.html', threads={}, folders=folders_data, current_folder=folder, error=str(e), settings=settings, query=query, trash_folder_id=None, labels_map={}, labels_list=labels_list, t=t, lang=lang)
 
 @app.route('/api/get_message/<uid>')
 def get_message_api(uid):
     folder = request.args.get('folder', 'INBOX')
+    
+    def process_msg_data(html_content, text_content, attachments_json=None, attachments_list=None):
+        if not html_content and text_content:
+            html_content = f"<pre>{text_content}</pre>"
+        
+        atts = []
+        if attachments_json:
+            try: 
+                atts = json.loads(attachments_json)
+                atts = [a for a in atts if not (a.get('content_type') or '').lower().startswith('image/')]
+            except: pass
+        elif attachments_list:
+            atts = [{'filename': a.filename or "noname", 'size': a.size, 'content_type': a.content_type} for a in attachments_list]
+            atts = [a for a in atts if not (a.get('content_type') or '').lower().startswith('image/')]
+
+        safe_html = html_content
+        if safe_html:
+            safe_html = re.sub(r'<script[^>]*>.*?</script>', '', safe_html, flags=re.DOTALL|re.IGNORECASE)
+        else:
+            safe_html = (text_content or "").replace('\n', '<br>')
+
+        safe_body = base64.b64encode((safe_html or "").encode('utf-8', 'ignore')).decode('utf-8')
+        
+        return {
+            'uid': str(uid),
+            'body_safe': safe_body,
+            'attachments': atts
+        }
+
     try:
-        # Försök hämta från DB först (snabbast)
+        # 1. Försök hämta från DB först
         with sqlite3.connect(DB_FILE) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT * FROM emails WHERE uid=? AND folder=?", (uid, folder)).fetchone()
-            if row:
-                html_content = row['html'] or ""
-                text_content = row['body'] or ""
-                
-                if not html_content and text_content:
-                    html_content = f"<pre>{text_content}</pre>"
-                
-                atts = []
-                if row['attachments']:
-                    try: 
-                        atts = json.loads(row['attachments'])
-                        atts = [a for a in atts if not (a.get('content_type') or '').lower().startswith('image/')]
-                    except: pass
+            if row and (row['html'] or row['body']):
+                data = process_msg_data(row['html'], row['body'], attachments_json=row['attachments'])
+                data['subject'] = row['subject']
+                data['from'] = row['sender']
+                return json.dumps(data)
 
-                safe_html = html_content
-                if safe_html:
-                    safe_html = re.sub(r'<script[^>]*>.*?</script>', '', safe_html, flags=re.DOTALL|re.IGNORECASE)
-                else:
-                    safe_html = (text_content or "").replace('\n', '<br>')
-
-                safe_body = base64.b64encode((safe_html or "").encode('utf-8', 'ignore')).decode('utf-8')
+        # 2. Fallback till IMAP om DB är tom
+        with get_mailbox() as mb:
+            mb.folder.set(folder)
+            msgs = list(mb.fetch(A(uid=uid)))
+            if msgs:
+                msg = msgs[0]
+                body_html = msg.html or ""
+                body_text = msg.text or ""
                 
-                return json.dumps({
-                    'uid': str(row['uid']),
-                    'subject': row['subject'],
-                    'from': row['sender'],
-                    'body_safe': safe_body,
-                    'attachments': atts
-                })
+                # Uppdatera DB så vi slipper hämta nästa gång
+                atts_data = []
+                for a in msg.attachments:
+                     if not a.content_id and not (a.content_disposition == 'inline'):
+                        atts_data.append({'filename': a.filename or "noname", 'size': a.size, 'content_type': a.content_type})
+                
+                with sqlite3.connect(DB_FILE) as conn:
+                    conn.execute("UPDATE emails SET body=?, html=?, attachments=? WHERE uid=? AND folder=?", 
+                                (body_text, body_html, json.dumps(atts_data), uid, folder))
+                
+                data = process_msg_data(body_html, body_text, attachments_list=msg.attachments)
+                data['subject'] = msg.subject
+                data['from'] = msg.from_
+                return json.dumps(data)
+
     except Exception as e: return json.dumps({'error': str(e)})
     return json.dumps({'error': 'Not found'})
 
@@ -1788,6 +1842,34 @@ def delete_label():
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("DELETE FROM labels WHERE id=?", (id,))
     return "OK"
+
+@app.route('/api/assign_label', methods=['POST'])
+def assign_label():
+    try:
+        label_id = int(request.form.get('label_id'))
+        uids_str = request.form.get('uids')
+        if not uids_str: return "No UIDs"
+        uids = [u.strip() for u in uids_str.split(',') if u.strip()]
+        
+        with sqlite3.connect(DB_FILE) as conn:
+            placeholders = ','.join('?' * len(uids))
+            rows = conn.execute(f"SELECT uid, folder, labels FROM emails WHERE uid IN ({placeholders})", uids).fetchall()
+            
+            updates = []
+            for r in rows:
+                uid, folder, lbls_json = r
+                try:
+                    lbls = json.loads(lbls_json) if lbls_json else []
+                except: lbls = []
+                
+                if label_id not in lbls:
+                    lbls.append(label_id)
+                    updates.append((json.dumps(lbls), uid, folder))
+            
+            if updates:
+                conn.executemany("UPDATE emails SET labels=? WHERE uid=? AND folder=?", updates)
+        return "OK"
+    except Exception as e: return str(e)
 
 @app.route('/api/save_draft', methods=['POST'])
 def save_draft():
