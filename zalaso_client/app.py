@@ -1129,8 +1129,10 @@ def index():
                 with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                     conn.row_factory = sqlite3.Row
                     # Hämta alla mail som har etiketter och filtrera i Python
-                    # Optimering: Hämta bara metadata först för att filtrera snabbt
-                    all_labeled = conn.execute("SELECT uid, labels, date_iso FROM emails WHERE labels IS NOT NULL AND labels != '[]' ORDER BY date_iso DESC").fetchall()
+                    # Optimering: Använd LIKE för att grovsortera i SQL (mycket snabbare än att hämta allt)
+                    # Vi söker på label_id som del av strängen. Python-loopen nedan verifierar exakt matchning.
+                    like_pattern = f'%{label_id}%'
+                    all_labeled = conn.execute("SELECT uid, labels, date_iso FROM emails WHERE labels LIKE ? ORDER BY date_iso DESC", (like_pattern,)).fetchall()
                     
                     filtered_uids = []
                     for r in all_labeled:

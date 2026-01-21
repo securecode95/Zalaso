@@ -604,12 +604,12 @@
         <button @click="undoMove()" class="text-blue-300 font-bold hover:text-blue-200 uppercase text-sm tracking-wide" x-text="t.undo"></button>
     </div>
 
-    <div class="w-64 flex-shrink-0 flex flex-col p-4 bg-[#f6f8fc]">
-        <div class="flex items-center mb-6 px-4 cursor-pointer" @click="activeThread = null; replyTarget = null">
-            <img src="{{ url_for('static', filename='zalaso.png') }}" alt="Zalaso" class="h-24 w-auto object-contain">
+    <div class="{{ 'w-56' if settings.get('layout') == 'compact' else 'w-64' }} flex-shrink-0 flex flex-col {{ 'p-2' if settings.get('layout') == 'compact' else 'p-4' }} bg-[#f6f8fc] transition-all duration-300">
+        <div class="flex items-center {{ 'mb-4' if settings.get('layout') == 'compact' else 'mb-6' }} px-4 cursor-pointer" @click="activeThread = null; replyTarget = null">
+            <img src="{{ url_for('static', filename='zalaso.png') }}" alt="Zalaso" class="{{ 'h-16' if settings.get('layout') == 'compact' else 'h-24' }} w-auto object-contain transition-all">
         </div>
-        <button @click="openCompose()" class="mb-6 mx-2 flex items-center justify-center h-14 bg-[#c2e7ff] hover:shadow-md transition rounded-2xl text-[#001d35] font-bold gap-3 shadow-sm">
-            <img src="{{ url_for('static', filename='ikoner/write.png') }}" class="w-6 h-6 object-contain"> <span class="pr-2" x-text="t.compose"></span>
+        <button @click="openCompose()" class="{{ 'mb-4' if settings.get('layout') == 'compact' else 'mb-6' }} mx-2 flex items-center justify-center {{ 'h-10 rounded-xl text-sm' if settings.get('layout') == 'compact' else 'h-14 rounded-2xl' }} bg-[#c2e7ff] hover:shadow-md transition-all text-[#001d35] font-bold gap-3 shadow-sm">
+            <img src="{{ url_for('static', filename='ikoner/write.png') }}" class="{{ 'w-5 h-5' if settings.get('layout') == 'compact' else 'w-6 h-6' }} object-contain"> <span class="pr-2" x-text="t.compose"></span>
         </button>
         <div class="flex items-center justify-between px-4 mt-2 mb-2">
             <span class="text-xs font-bold text-gray-500 uppercase flex items-center gap-2">
@@ -625,7 +625,7 @@
                @dragover.prevent="$el.classList.add('bg-blue-100'); $event.dataTransfer.dropEffect = 'move'" 
                @dragleave="$el.classList.remove('bg-blue-100')" 
                @drop.prevent="$el.classList.remove('bg-blue-100'); moveMail('{{ f.id }}', $event.dataTransfer.getData('text/plain'))"
-               class="group flex items-center px-6 py-3 rounded-r-full -ml-4 {{ 'bg-[#d3e3fd] text-blue-900 font-bold' if current_folder == f.id else 'text-gray-700 hover:bg-gray-200 hover:shadow-sm border border-transparent hover:border-gray-300' }}">
+               class="group flex items-center px-6 {{ 'py-1.5' if settings.get('layout') == 'compact' else 'py-3' }} rounded-r-full -ml-4 {{ 'bg-[#d3e3fd] text-blue-900 font-bold' if current_folder == f.id else 'text-gray-700 hover:bg-gray-200 hover:shadow-sm border border-transparent hover:border-gray-300' }}">
                 {% if f.is_image %}
                 <img src="{{ url_for('static', filename='ikoner/' + f.icon) }}" class="w-6 h-6 mr-3 object-contain">
                 {% else %}
@@ -642,7 +642,7 @@
                @dragover.prevent="$el.classList.add('bg-blue-100'); $event.dataTransfer.dropEffect = 'move'" 
                @dragleave="$el.classList.remove('bg-blue-100')" 
                @drop.prevent="$el.classList.remove('bg-blue-100'); moveMail('{{ f.id }}', $event.dataTransfer.getData('text/plain'))"
-               class="group flex items-center px-6 py-3 rounded-r-full -ml-4 {{ 'bg-[#d3e3fd] text-blue-900 font-bold' if current_folder == f.id else 'text-gray-700 hover:bg-gray-200 hover:shadow-sm border border-transparent hover:border-gray-300' }}">
+               class="group flex items-center px-6 {{ 'py-1.5' if settings.get('layout') == 'compact' else 'py-3' }} rounded-r-full -ml-4 {{ 'bg-[#d3e3fd] text-blue-900 font-bold' if current_folder == f.id else 'text-gray-700 hover:bg-gray-200 hover:shadow-sm border border-transparent hover:border-gray-300' }}">
                 {% if f.is_image %}<img src="{{ url_for('static', filename='ikoner/' + f.icon) }}" class="w-6 h-6 mr-3 object-contain">{% else %}<span class="mr-3 text-lg">{{ f.icon }}</span>{% endif %}
                 <span class="truncate text-sm flex-1">{{ f.name }}</span>
                 <button @click.stop.prevent="deleteFolder('{{ f.id }}')" class="p-1 hover:bg-red-100 rounded-full text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition" title="Radera mapp">🗑️</button>
@@ -651,17 +651,22 @@
         </nav>
 
         <!-- Labels Section -->
-        <div class="pt-4 pb-2 px-4 text-xs font-bold text-gray-500 uppercase flex justify-between items-center mt-2 border-t border-gray-200">
-            <span x-text="t.labels"></span>
-            <button @click="activeTab = 'labels'; showSettings = true" class="text-gray-400 hover:text-blue-600 transition" title="Hantera etiketter">⚙️</button>
-        </div>
-        <div class="overflow-y-auto max-h-48">
-            {% for l in labels_list %}
-            <a href="/?folder=LABEL:{{ l.id }}" @click.prevent="goToFolder('LABEL:{{ l.id }}')" @dragover.prevent="$el.classList.add('bg-blue-100'); $event.dataTransfer.dropEffect = 'copy'" @dragleave="$el.classList.remove('bg-blue-100')" @drop.prevent="$el.classList.remove('bg-blue-100'); assignLabel({{ l.id }}, $event.dataTransfer.getData('text/plain'))" class="group flex items-center px-6 py-2 rounded-r-full -ml-4 {{ 'bg-[#d3e3fd] text-blue-900 font-bold' if current_folder == 'LABEL:' ~ l.id else 'text-gray-700 hover:bg-gray-200 hover:shadow-sm border border-transparent hover:border-gray-300' }}">
-                <span class="w-3 h-3 rounded-full mr-3 flex-shrink-0" style="background-color: {{ l.color }}"></span>
-                <span class="truncate text-sm flex-1">{{ l.name }}</span>
-            </a>
-            {% endfor %}
+        <div x-data="{ labelsOpen: false }" class="mt-2 border-t border-gray-200">
+            <div @click="labelsOpen = !labelsOpen" class="pt-4 pb-2 px-4 text-xs font-bold text-gray-500 uppercase flex justify-between items-center cursor-pointer hover:bg-gray-100 transition select-none">
+                <div class="flex items-center gap-2">
+                    <span class="transform transition-transform duration-200 text-[10px]" :class="labelsOpen ? 'rotate-90' : ''">▶</span>
+                    <span x-text="t.labels"></span>
+                </div>
+                <button @click.stop="activeTab = 'labels'; showSettings = true" class="text-gray-400 hover:text-blue-600 transition" title="Hantera etiketter">⚙️</button>
+            </div>
+            <div x-show="labelsOpen" class="overflow-y-auto max-h-48">
+                {% for l in labels_list %}
+                <a href="/?folder=LABEL:{{ l.id }}" @click.prevent="goToFolder('LABEL:{{ l.id }}')" @dragover.prevent="$el.classList.add('bg-blue-100'); $event.dataTransfer.dropEffect = 'copy'" @dragleave="$el.classList.remove('bg-blue-100')" @drop.prevent="$el.classList.remove('bg-blue-100'); assignLabel({{ l.id }}, $event.dataTransfer.getData('text/plain'))" class="group flex items-center px-6 {{ 'py-1.5' if settings.get('layout') == 'compact' else 'py-2' }} rounded-r-full -ml-4 {{ 'bg-[#d3e3fd] text-blue-900 font-bold' if current_folder == 'LABEL:' ~ l.id else 'text-gray-700 hover:bg-gray-200 hover:shadow-sm border border-transparent hover:border-gray-300' }}">
+                    <span class="w-3 h-3 rounded-full mr-3 flex-shrink-0" style="background-color: {{ l.color }}"></span>
+                    <span class="truncate text-sm flex-1">{{ l.name }}</span>
+                </a>
+                {% endfor %}
+            </div>
         </div>
 
         <div class="mt-4 pt-4 border-t border-gray-200">
