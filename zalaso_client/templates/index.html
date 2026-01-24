@@ -808,7 +808,7 @@
                         {% if is_forward %}
                         <span class="mr-2 text-gray-500 bg-gray-100 px-1.5 rounded text-xs font-medium border border-gray-200 flex-shrink-0">Vb</span>
                         {% endif %}
-                        <span x-show="{{ 'true' if data.get('has_draft') else 'false' }}" class="mr-2 text-red-500 font-bold text-xs uppercase tracking-wider">Utkast</span>
+                        <span x-show="{{ 'true' if data.get('has_draft') else 'false' }}" x-cloak class="mr-2 text-red-500 font-bold text-xs uppercase tracking-wider">Utkast</span>
                         {% for l_id in data['labels'] %}
                             {% if l_id in labels_map %}
                             <span class="mr-2 px-2 py-0.5 rounded text-[10px] font-bold text-white flex-shrink-0" style="background-color: {{ labels_map[l_id]['color'] }}">{{ labels_map[l_id]['name'] }}</span>
@@ -880,24 +880,24 @@
             <div class="flex-1 overflow-y-auto bg-[#f8f9fa]">
                 {% for id, data in threads.items() %}
                 <template x-if="activeThread === '{{ id }}'">
-                <div class="w-full pb-24" x-init="
-                    if ('{{ data.get('has_draft') }}' === 'True') {
-                        const draft = {{ data.get('draft', {}) | tojson }};
+                <div class="w-full pb-24" x-init='
+                    if ("{{ data.get("has_draft") }}" === "True") {
+                        const draft = {{ data.get("draft", {}) | tojson }};
                         if(draft.uid) {
                             $nextTick(() => {
                                 openReply(draft.uid, draft.to, draft.subject, draft.body_safe, draft.attachments);
                             });
                         }
-                    } else if ('{{ 'draft' in current_folder.lower() or 'utkast' in current_folder.lower() }}' === 'True') {
-                        const msgs = {{ data['msgs'] | tojson }};
+                    } else if ("{{ "draft" in current_folder.lower() or "utkast" in current_folder.lower() }}" === "True") {
+                        const msgs = {{ data["msgs"] | tojson }};
                         if(msgs.length > 0) {
                             const lastMsg = msgs[msgs.length - 1];
                             $nextTick(() => {
-                                openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || '{{ data['subject'] }}', lastMsg.body_safe, lastMsg.attachments);
+                                openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, lastMsg.body_safe, lastMsg.attachments);
                             });
                         }
                     }
-                ">
+                '>
                     <div class="p-6 border-b border-gray-300 bg-white">
                         <h2 class="text-xl font-medium text-gray-800">{{ data['subject'] }}</h2>
                         {% if data['msgs']|length > 1 %}
