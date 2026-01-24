@@ -749,7 +749,7 @@ def sync_worker(folder):
                     uid_str = [str(u) for u in recent_uids]
                     flags_map = {}
                     # Hämta bara flaggor (snabbt)
-                    for msg in mb.fetch(A(uid=uid_str), ['FLAGS', 'UID']):
+                    for msg in mb.fetch(A(uid=uid_str), headers_only=True):
                         flags_map[str(msg.uid)] = msg.flags
                     
                     read_updates = {}
