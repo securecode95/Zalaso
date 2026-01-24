@@ -1177,7 +1177,7 @@ def index():
         for msg in mails:
             sender = msg.from_ or "Okänd"
             
-            if 'sent' in folder.lower() or 'skickat' in folder.lower():
+            if 'sent' in folder.lower() or 'skickat' in folder.lower() or 'draft' in folder.lower() or 'utkast' in folder.lower():
                 if hasattr(msg, 'recipients') and msg.recipients:
                     sender = f"Till: {msg.recipients}"
                 full_sender = sender
@@ -1318,7 +1318,8 @@ def index():
                 'body_html': body_html,
                 'body_safe': safe_body,
                 'has_body': bool(body_html or safe_body),
-                'attachments': atts
+                'attachments': atts,
+                'recipients': getattr(msg, 'recipients', '')
             })
 
             for l in msg.labels:
@@ -1340,6 +1341,48 @@ def index():
                         a_copy['folder'] = getattr(msg, 'original_folder', folder)
                         threads[tid]['thread_attachments'][existing_idx] = a_copy
         
+        # Leta efter utkast som hör till trådarna (om vi inte redan är i utkast/papperskorg)
+        is_draft_folder = 'draft' in folder.lower() or 'utkast' in folder.lower()
+        if not is_draft_folder and not is_trash and folder != 'STARRED':
+            visible_subjects = {tdata['subject'] for tdata in threads.values()}
+            if visible_subjects:
+                with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+                    conn.row_factory = sqlite3.Row
+                    # Hitta utkast-mappar
+                    draft_folders = ['INBOX.Drafts', 'Drafts', 'Utkast', 'INBOX.Utkast']
+                    try:
+                        cur = conn.execute("SELECT name FROM local_folders")
+                        for r in cur:
+                            if ('draft' in r[0].lower() or 'utkast' in r[0].lower()) and r[0] not in draft_folders:
+                                draft_folders.append(r[0])
+                    except: pass
+
+                    placeholders = ','.join('?' * len(draft_folders))
+                    draft_rows = conn.execute(f"SELECT * FROM emails WHERE folder IN ({placeholders})", draft_folders).fetchall()
+                    
+                    for r in draft_rows:
+                        d_subj = (r['subject'] or "").replace('Re: ','').replace('Sv: ','').replace('Fwd: ','').replace('Vb: ','').strip()
+                        for tid, tdata in threads.items():
+                            if tdata['subject'] == d_subj:
+                                tdata['has_draft'] = True
+                                # Förbered utkast-data för frontend
+                                d_msg = MockMsg(r)
+                                body_html = d_msg.html or ""
+                                if not body_html and d_msg.text: body_html = f"<pre>{d_msg.text}</pre>"
+                                safe_html = body_html
+                                if safe_html: safe_html = re.sub(r'<script[^>]*>.*?</script>', '', safe_html, flags=re.DOTALL|re.IGNORECASE)
+                                safe_body = base64.b64encode((safe_html or "").encode('utf-8', 'ignore')).decode('utf-8')
+                                
+                                tdata['draft'] = {
+                                    'uid': str(d_msg.uid),
+                                    'folder': r['folder'],
+                                    'to': r['recipients'] or "",
+                                    'subject': r['subject'],
+                                    'body_safe': safe_body,
+                                    'attachments': d_msg.attachments_data
+                                }
+                                break
+
         total_pages = max(1, (total + per_page - 1) // per_page)
         
         start_idx = (page - 1) * per_page + 1 if total > 0 else 0
