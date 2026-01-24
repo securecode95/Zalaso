@@ -2037,7 +2037,52 @@ def save_draft():
         
         log_event("Sparar utkast")
         body = (request.form.get('body') or "").replace('\n','<br>')
+        
+        # Hantera vidarebefordrade filer (Samma logik som send)
+        forward_uid = request.form.get('forward_uid')
+        folder = request.form.get('folder')
+        forward_files = request.form.getlist('forward_files')
+        parts = []
+
+        if forward_uid and folder:
+            try:
+                with get_mailbox() as mb:
+                    mb.folder.set(folder)
+                    msgs = list(mb.fetch(A(uid=str(forward_uid))))
+                    if msgs:
+                        orig_msg = msgs[0]
+                        for att in orig_msg.attachments:
+                            fname = att.filename or "noname"
+                            cid = (att.content_id or "").strip('<>')
+                            if not cid: cid = f"{hashlib.md5(fname.encode()).hexdigest()}@zalaso"
+                            
+                            placeholder_image = f'[image: {fname}]'
+                            placeholder_cid = f'[cid:{cid}]'
+                            should_attach = fname in forward_files or placeholder_image in body or placeholder_cid in body
+                            
+                            if should_attach:
+                                try:
+                                    ctype = att.content_type or 'application/octet-stream'
+                                    maintype, subtype = ctype.split('/', 1) if '/' in ctype else ('application', 'octet-stream')
+                                    part = MIMEBase(maintype, subtype)
+                                    part.set_payload(att.payload)
+                                    encoders.encode_base64(part)
+                                    
+                                    if placeholder_image in body:
+                                        body = body.replace(placeholder_image, f'<img src="cid:{cid}" alt="{fname}" style="max-width:100%">')
+                                    if placeholder_cid in body:
+                                        body = body.replace(placeholder_cid, f'<img src="cid:{cid}" alt="{fname}" style="max-width:100%">')
+                                    
+                                    part.add_header('Content-ID', f'<{cid}>')
+                                    part.add_header('Content-Disposition', f'attachment; filename="{fname}"')
+                                    parts.append(part)
+                                except: pass
+            except: pass
+
         msg.attach(MIMEText(body, 'html'))
+
+        for p in parts:
+            msg.attach(p)
 
         if 'files' in request.files:
             for f in request.files.getlist('files'):

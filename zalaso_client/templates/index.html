@@ -183,7 +183,7 @@
                         }
                     });
                     window.addEventListener('pagehide', () => {
-                        if (this.showCompose) this.saveDraft();
+                        if (this.showCompose || this.replyTarget) this.saveDraft();
                     });
                 },
 
@@ -241,6 +241,7 @@
                     const hasPage = urlParams.has('page') && parseInt(urlParams.get('page')) > 1;
 
                     if (this.currentFolder === folderId && !hasQuery && !hasPage) {
+                        this.saveDraft();
                         this.closeThread();
                         this.replyTarget = null;
                         window.location.reload();
@@ -491,15 +492,47 @@
                     this.mailsToMove = [];
                 },
                 async saveDraft() {
-                    if (this.isSavingDraft) return;
+                    if (this.isSavingDraft || this.isSending) return;
+                    
+                    let to, subj, body, files, forwardUid, forwardFiles;
+                    const currentFolder = this.currentFolder;
+
+                    if (this.showCompose) {
+                        to = this.composeTo;
+                        subj = this.composeSubj;
+                        body = this.composeBody;
+                        files = this.composeAttachments;
+                    } else if (this.replyTarget) {
+                        to = this.replyTo;
+                        subj = this.replySubj;
+                        body = this.replyBody;
+                        files = this.attachments;
+                        if (this.isForward) {
+                            forwardUid = this.replyTarget;
+                            forwardFiles = this.forwardAttachments;
+                        }
+                    } else {
+                        return;
+                    }
+
                     const emptySig = this.signature ? '<br><br>' + this.signature.replace(/\n/g, '<br>') : '';
-                    if (!this.composeTo && !this.composeSubj && (!this.composeBody || this.composeBody === emptySig)) return;
+                    if (!to && !subj && (!body || body === emptySig || body.trim() === '')) return;
+                    
                     this.isSavingDraft = true;
                     const fd = new FormData();
-                    fd.append('to', this.composeTo);
-                    fd.append('subject', this.composeSubj);
-                    fd.append('body', this.composeBody);
-                    this.composeAttachments.forEach(f => fd.append('files', f));
+                    fd.append('to', to);
+                    fd.append('subject', subj);
+                    fd.append('body', body);
+                    if (files) files.forEach(f => fd.append('files', f));
+                    
+                    if (forwardUid) {
+                        fd.append('forward_uid', forwardUid);
+                        fd.append('folder', currentFolder);
+                        if (forwardFiles) {
+                            forwardFiles.forEach(f => fd.append('forward_files', f.filename));
+                        }
+                    }
+                    
                     try { await fetch('/api/save_draft', { method: 'POST', body: fd, keepalive: true }); } catch(e) {}
                     this.isSavingDraft = false;
                 },
@@ -840,7 +873,7 @@
 
         <div x-show="activeThread !== null" class="absolute inset-0 bg-white z-10 flex flex-col" x-cloak>
             <div class="p-4 border-b border-gray-100 flex items-center gap-4 bg-white sticky top-0 shadow-sm z-30">
-                <button @click="closeThread(); replyTarget = null" class="p-2 hover:bg-gray-100 rounded-full text-blue-600 font-bold transition">← <span x-text="t.inbox"></span></button>
+                <button @click="saveDraft(); closeThread(); replyTarget = null" class="p-2 hover:bg-gray-100 rounded-full text-blue-600 font-bold transition">← <span x-text="t.inbox"></span></button>
             </div>
 
             <div class="flex-1 overflow-y-auto bg-[#f8f9fa]">
@@ -1008,7 +1041,7 @@
                     <div class="bg-gray-50 px-4 py-2 border-b border-gray-300 text-xs font-bold text-gray-500 flex justify-between items-center">
                         <span x-show="!isForward"><span x-text="t.reply_to"></span> <span class="text-gray-800" x-text="replyTo"></span></span>
                         <span x-show="isForward" x-text="t.forwarding"></span>
-                        <button @click="replyTarget = null" class="p-2 hover:bg-gray-200 rounded-full transition">✕</button>
+                        <button @click="saveDraft(); replyTarget = null" class="p-2 hover:bg-gray-200 rounded-full transition">✕</button>
                     </div>
                     <form action="/send" method="POST" enctype="multipart/form-data" class="flex flex-col p-4" @dragover.prevent @drop.prevent="handleFiles($event.dataTransfer.files)" @submit.prevent="if(!replyTo){ alert(t.fill_imap); return; } sendAjax($event, true)">
                         <div x-show="isForward" class="flex items-center mb-4 relative">
