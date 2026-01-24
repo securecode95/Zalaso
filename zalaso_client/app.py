@@ -926,6 +926,14 @@ def get_translations(lang=None):
     if not lang: lang = get_language()
     return TRANSLATIONS.get(lang, TRANSLATIONS['sv'])
 
+@app.after_request
+def add_header(response):
+    if request.endpoint == 'index':
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '-1'
+    return response
+
 @app.before_request
 def require_login():
     # Säkerställ att databasen finns och har tabeller (om den raderats manuellt)
@@ -2052,6 +2060,7 @@ def save_draft():
 
             try:
                 mb.append(msg.as_bytes(), draft_folder, flag_set=['\\Draft', '\\Seen'])
+                threading.Thread(target=sync_worker, args=(draft_folder,), daemon=True).start()
                 return "Saved"
             except: return "Error saving draft"
     except Exception as e: return str(e)
