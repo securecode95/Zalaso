@@ -4,7 +4,7 @@ services:
     build: ./zalaso_client
     container_name: zalaso_app
     ports:
-      - "5000:5000"
+      - "5000:80"
     volumes:
       - ./zalaso_client:/app  # Gör att du kan ändra kod live utan omstart
     networks:

@@ -1017,6 +1017,12 @@ def index():
 
     if folder != 'STARRED':
         threading.Thread(target=sync_worker, args=(folder,), daemon=True).start()
+        # Fix: Om mappen är tom lokalt, vänta en kort stund så vi hinner hämta mail
+        try:
+            with sqlite3.connect(DB_FILE, timeout=5.0) as conn:
+                if conn.execute("SELECT COUNT(*) FROM emails WHERE folder=?", (folder,)).fetchone()[0] == 0:
+                    time.sleep(1.5)
+        except: pass
 
     # Starta mapp-synk i bakgrunden
     threading.Thread(target=sync_folder_structure, daemon=True).start()
@@ -2148,6 +2154,17 @@ def save_draft():
 
             try:
                 mb.append(msg.as_bytes(), draft_folder, flag_set=['\\Draft', '\\Seen'])
+                
+                # Radera gammalt utkast om vi uppdaterar ett befintligt
+                old_uid = request.form.get('old_uid')
+                if old_uid:
+                    try:
+                        mb.folder.set(draft_folder)
+                        mb.delete(old_uid)
+                        try: mb.expunge()
+                        except: pass
+                    except: pass
+
                 threading.Thread(target=sync_worker, args=(draft_folder,), daemon=True).start()
                 return "Saved"
             except: return "Error saving draft"

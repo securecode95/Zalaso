@@ -48,6 +48,8 @@
                 replyTo: '',
                 replySubj: '',
                 replyBody: '',
+                replyFolder: null,
+                isDraftEditing: false,
                 attachments: [],
                 forwardAttachments: [],
                 isForward: false,
@@ -185,6 +187,25 @@
                     window.addEventListener('pagehide', () => {
                         if (this.showCompose || this.replyTarget) this.saveDraft();
                     });
+                    // Autospar var 5:e sekund om vi skriver
+                    // setInterval(() => {
+                    //     if ((this.showCompose || this.replyTarget) && !this.isSavingDraft) this.saveDraft();
+                    // }, 5000);
+
+                    let editorObserver = new MutationObserver((mutations) => {
+                        mutations.forEach((mutation) => {
+                            if (mutation.type === 'characterData' || mutation.type === 'childList') {
+                                if ((this.showCompose || this.replyTarget) && !this.isSavingDraft) {
+                                    // Debounce: Vänta 1 sekund efter sista ändringen
+                                    if (this.saveTimeout) clearTimeout(this.saveTimeout);
+                                    this.saveTimeout = setTimeout(() => this.saveDraft(), 1000);
+                                }
+                            }
+                        });
+                    });
+                    editorObserver.observe(document.body, {
+                        subtree: true, // Övervaka alla element
+                        characterData: true, // Ändringar i text
                 },
 
                 onContactInput() {
@@ -380,21 +401,27 @@
                         fetch('/api/empty_trash', { method: 'POST', body: fd }).then(() => window.location.reload());
                     }
                 },
-                openReply(uid, to, subj, base64Body, attachments) {
+                openReply(uid, to, subj, base64Body, attachments, isDraft = false, folder = null) {
                     this.replyTarget = uid;
                     this.replyTo = to;
                     this.replySubj = subj;
-                    this.isForward = (to === '');
+                    this.replyFolder = folder || this.currentFolder;
+                    this.isDraftEditing = isDraft;
+                    this.isForward = (to === '') && !isDraft;
                     this.attachments = [];
                     this.forwardAttachments = attachments || [];
                     this.showReplyContactSuggestions = false;
                     try {
                         let decoded = decodeURIComponent(escape(atob(base64Body)));
-                        let sig = this.signature ? '<br><br>' + this.signature.replace(/\n/g, '<br>') : '';
-                        if (this.isForward) {
-                            this.replyBody = sig + '<br><br>' + this.t.forwarded_message + '<br>' + decoded;
+                        if (isDraft) {
+                            this.replyBody = decoded;
                         } else {
-                            this.replyBody = sig + '<br><br>--- ' + to + ' ' + this.t.wrote + ' ---<br><blockquote style="border-left: 2px solid #ccc; padding-left: 10px; margin-left: 5px;">' + decoded + '</blockquote>';
+                            let sig = this.signature ? '<br><br>' + this.signature.replace(/\n/g, '<br>') : '';
+                            if (this.isForward) {
+                                this.replyBody = sig + '<br><br>' + this.t.forwarded_message + '<br>' + decoded;
+                            } else {
+                                this.replyBody = sig + '<br><br>--- ' + to + ' ' + this.t.wrote + ' ---<br><blockquote style="border-left: 2px solid #ccc; padding-left: 10px; margin-left: 5px;">' + decoded + '</blockquote>';
+                            }
                         }
                     } catch(e) { this.replyBody = ''; }
                     
@@ -507,7 +534,7 @@
                         subj = this.replySubj;
                         body = this.replyBody;
                         files = this.attachments;
-                        if (this.isForward) {
+                        if (this.isForward || this.isDraftEditing) {
                             forwardUid = this.replyTarget;
                             forwardFiles = this.forwardAttachments;
                         }
@@ -527,10 +554,14 @@
                     
                     if (forwardUid) {
                         fd.append('forward_uid', forwardUid);
-                        fd.append('folder', currentFolder);
+                        fd.append('folder', this.replyFolder || currentFolder);
                         if (forwardFiles) {
                             forwardFiles.forEach(f => fd.append('forward_files', f.filename));
                         }
+                    }
+
+                    if (this.isDraftEditing && this.replyTarget) {
+                        fd.append('old_uid', this.replyTarget);
                     }
                     
                     try { await fetch('/api/save_draft', { method: 'POST', body: fd, keepalive: true }); } catch(e) {}
@@ -808,7 +839,7 @@
                         {% if is_forward %}
                         <span class="mr-2 text-gray-500 bg-gray-100 px-1.5 rounded text-xs font-medium border border-gray-200 flex-shrink-0">Vb</span>
                         {% endif %}
-                        <span x-show="{{ 'true' if data.get('has_draft') else 'false' }}" x-cloak class="mr-2 text-red-500 font-bold text-xs uppercase tracking-wider">Utkast</span>
+                        <span x-show="{{ 'true' if data.get('has_draft') else 'false' }}" x-cloak class="mr-2 bg-yellow-100 text-yellow-800 border border-yellow-200 font-bold text-xs px-2 py-0.5 rounded uppercase tracking-wider">Utkast</span>
                         {% for l_id in data['labels'] %}
                             {% if l_id in labels_map %}
                             <span class="mr-2 px-2 py-0.5 rounded text-[10px] font-bold text-white flex-shrink-0" style="background-color: {{ labels_map[l_id]['color'] }}">{{ labels_map[l_id]['name'] }}</span>
@@ -869,12 +900,19 @@
                     </div>
                 </div>
                 {% endfor %}
+
+                {% if not threads and not query %}
+                <div class="flex flex-col items-center justify-center h-full pb-20 text-gray-400" x-init="setTimeout(() => window.location.reload(), 2000)">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mb-4"></div>
+                    <p>Synkroniserar...</p>
+                </div>
+                {% endif %}
             </div>
         </div>
 
         <div x-show="activeThread !== null" class="absolute inset-0 bg-white z-10 flex flex-col" x-cloak>
             <div class="p-4 border-b border-gray-100 flex items-center gap-4 bg-white sticky top-0 shadow-sm z-30">
-                <button @click="saveDraft(); closeThread(); replyTarget = null" class="p-2 hover:bg-gray-100 rounded-full text-blue-600 font-bold transition">← <span x-text="t.inbox"></span></button>
+                <button @click="saveDraft(); setTimeout(() => { closeThread(); replyTarget = null; }, 50)" class="p-2 hover:bg-gray-100 rounded-full text-blue-600 font-bold transition">← <span x-text="t.inbox"></span></button>
             </div>
 
             <div class="flex-1 overflow-y-auto bg-[#f8f9fa]">
@@ -885,7 +923,7 @@
                         const draft = {{ data.get("draft", {}) | tojson }};
                         if(draft.uid) {
                             $nextTick(() => {
-                                openReply(draft.uid, draft.to, draft.subject, draft.body_safe, draft.attachments);
+                                openReply(draft.uid, draft.to, draft.subject, draft.body_safe, draft.attachments, true, draft.folder);
                             });
                         }
                     } else if ("{{ "draft" in current_folder.lower() or "utkast" in current_folder.lower() }}" === "True") {
@@ -893,7 +931,7 @@
                         if(msgs.length > 0) {
                             const lastMsg = msgs[msgs.length - 1];
                             $nextTick(() => {
-                                openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, lastMsg.body_safe, lastMsg.attachments);
+                                openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, lastMsg.body_safe, lastMsg.attachments, true, lastMsg.folder);
                             });
                         }
                     }
