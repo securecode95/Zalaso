@@ -206,6 +206,8 @@
                     editorObserver.observe(document.body, {
                         subtree: true, // Övervaka alla element
                         characterData: true, // Ändringar i text
+                        childList: true
+                    });
                 },
 
                 onContactInput() {
