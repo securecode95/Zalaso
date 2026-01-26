@@ -62,10 +62,6 @@
                 composeTo: '',
                 composeSubj: '',
                 composeBody: '',
-                deletedUids: [],
-                undoTimeout: null,
-                showUndo: false,
-                mailsToDelete: [],
                 composeAttachments: [],
                 starredUids: window.ZalasoConfig.starredUids,
                 signature: window.ZalasoConfig.signature,
@@ -80,12 +76,9 @@
                 allThreadIds: window.ZalasoConfig.allThreadIds,
                 allUids: window.ZalasoConfig.allUids,
                 isSavingDraft: false,
+                isDiscarding: false,
                 isSending: false,
                 uploadProgress: 0,
-                showMoveUndo: false,
-                mailsToMove: [],
-                moveDestination: '',
-                moveTimeout: null,
                 isSendingLogs: false,
                 previewDocOpen: false,
                 previewHtml: '',
@@ -176,19 +169,6 @@
                     });
 
                     window.addEventListener('beforeunload', (e) => { 
-                        if (this.showUndo) {
-                            const fd = new FormData();
-                            fd.append('folder', this.currentFolder);
-                            this.mailsToDelete.forEach(u => fd.append('uids[]', u));
-                            navigator.sendBeacon('/api/delete_mails', fd);
-                        }
-                        if (this.showMoveUndo) {
-                            const fd = new FormData();
-                            fd.append('folder', this.currentFolder);
-                            fd.append('uids', this.mailsToMove.join(','));
-                            fd.append('dest', this.moveDestination);
-                            navigator.sendBeacon('/api/move_mail', fd);
-                        }
                         if (this.showCompose && (this.composeTo || this.composeSubj || (this.composeBody && this.composeBody.trim() !== (this.signature ? this.signature.trim() : '')))) {
                             e.preventDefault();
                             e.returnValue = this.t.unsaved_changes;
@@ -260,15 +240,6 @@
                     }
                 },
                 async goToFolder(folderId) {
-                    if (this.showUndo) {
-                        clearTimeout(this.undoTimeout);
-                        await this.finalizeDelete(false);
-                    }
-                    if (this.showMoveUndo) {
-                        clearTimeout(this.moveTimeout);
-                        await this.finalizeMove(false);
-                    }
-
                     const urlParams = new URLSearchParams(window.location.search);
                     const hasQuery = urlParams.has('q') && urlParams.get('q').trim() !== '';
                     const hasPage = urlParams.has('page') && parseInt(urlParams.get('page')) > 1;
@@ -380,34 +351,37 @@
                 toggleAll() {
                     this.selectedMails = (this.selectedMails.length === this.allUids.length) ? [] : [...this.allUids];
                 },
-                async deleteSelected() {
+                deleteSelected() {
                     if(this.selectedMails.length === 0) return;
-                    if (this.selectedMails.length === this.allUids.length && this.allUids.length > 0) {
+                    if (this.selectedMails.length > 1 && this.selectedMails.length === this.allUids.length && this.allUids.length > 0) {
                         if(!confirm(this.t.delete_selected_confirm)) return;
                     }
-                    this.mailsToDelete = [...this.selectedMails];
-                    this.mailsToDelete.forEach(uid => this.deletedUids.push(uid));
-                    this.selectedMails = [];
-                    this.showUndo = true;
-                    if (this.undoTimeout) clearTimeout(this.undoTimeout);
-                    this.undoTimeout = setTimeout(() => this.finalizeDelete(), 5000);
-                },
-                deleteThread(uids) {
-                    const uidsArray = uids.toString().split(',');
-                    this.mailsToDelete = uidsArray;
-                    uidsArray.forEach(uid => this.deletedUids.push(uid));
-                    this.showUndo = true;
-                    if (this.undoTimeout) clearTimeout(this.undoTimeout);
-                    this.undoTimeout = setTimeout(() => this.finalizeDelete(), 5000);
-                },
-                async finalizeDelete(reload = true) {
                     const fd = new FormData();
                     fd.append('folder', this.currentFolder);
-                    this.mailsToDelete.forEach(u => fd.append('uids[]', u));
-                    this.showUndo = false;
-                    try { await fetch('/api/delete_mails', { method: 'POST', body: fd }); } catch(e) {}
-                    this.mailsToDelete = [];
-                    if (reload) window.location.reload();
+                    // Filtrera och lägg till UIDs
+                    const uids = [...new Set(this.selectedMails)].filter(u => u && u !== 'undefined' && u !== 'null');
+                    uids.forEach(u => fd.append('uids[]', u));
+                    
+                    fetch('/api/delete_mails', { method: 'POST', body: fd })
+                        .then(r => r.text())
+                        .then(text => {
+                            if (text !== 'OK') alert(this.t.error + ': ' + text);
+                            this.selectedMails = [];
+                            window.location.reload();
+                        })
+                        .catch(() => window.location.reload());
+                },
+                deleteThread(uids) {
+                    const fd = new FormData();
+                    fd.append('folder', this.currentFolder);
+                    uids.toString().split(',').forEach(u => fd.append('uids[]', u));
+                    fetch('/api/delete_mails', { method: 'POST', body: fd })
+                        .then(r => r.text())
+                        .then(text => {
+                            if (text !== 'OK') alert(this.t.error + ': ' + text);
+                            window.location.reload();
+                        })
+                        .catch(() => window.location.reload());
                 },
                 emptyTrash(folder) {
                     if(confirm(this.t.empty_trash_confirm)) {
@@ -504,8 +478,14 @@
                         if (el) {
                             const h = el.offsetHeight;
                             const w = el.offsetWidth;
-                            if (this.contextMenuY + h > window.innerHeight) this.contextMenuY -= h;
-                            if (this.contextMenuX + w > window.innerWidth) this.contextMenuX -= w;
+                            
+                            // Justera position så menyn alltid syns (klämmer mot kanten istället för att bara flippa)
+                            if (this.contextMenuY + h > window.innerHeight) {
+                                this.contextMenuY = Math.max(0, window.innerHeight - h - 10);
+                            }
+                            if (this.contextMenuX + w > window.innerWidth) {
+                                this.contextMenuX = Math.max(0, window.innerWidth - w - 10);
+                            }
                         }
                     });
                 },
@@ -520,30 +500,11 @@
                     
                     if (!targetUids || targetUids === 'undefined') return;
                     
-                    if (this.showMoveUndo) {
-                        clearTimeout(this.moveTimeout);
-                        this.finalizeMove(false);
-                    }
-
-                    const uidsArray = targetUids.split(',');
-                    this.mailsToMove = uidsArray;
-                    this.moveDestination = dest;
-                    
-                    uidsArray.forEach(uid => this.deletedUids.push(uid));
-                    
-                    this.showMoveUndo = true;
-                    if (this.moveTimeout) clearTimeout(this.moveTimeout);
-                    this.moveTimeout = setTimeout(() => this.finalizeMove(), 5000);
-                },
-                async finalizeMove(reload = true) {
                     const fd = new FormData();
                     fd.append('folder', this.currentFolder);
-                    fd.append('uids', this.mailsToMove.join(','));
-                    fd.append('dest', this.moveDestination);
-                    this.showMoveUndo = false;
-                    try { await fetch('/api/move_mail', { method: 'POST', body: fd }); } catch(e) {}
-                    this.mailsToMove = [];
-                    if (reload) window.location.reload();
+                    fd.append('uids', targetUids);
+                    fd.append('dest', dest);
+                    fetch('/api/move_mail', { method: 'POST', body: fd }).then(() => window.location.reload());
                 },
                 async assignLabel(labelId, uids) {
                     const fd = new FormData();
@@ -552,14 +513,35 @@
                     try { await fetch('/api/assign_label', { method: 'POST', body: fd }); } catch(e) {}
                     window.location.reload();
                 },
-                undoMove() {
-                    clearTimeout(this.moveTimeout);
-                    this.showMoveUndo = false;
-                    this.deletedUids = this.deletedUids.filter(uid => !this.mailsToMove.includes(uid));
-                    this.mailsToMove = [];
+                async discardDraft() {
+                    this.isDiscarding = true;
+                    if (this.saveTimeout) clearTimeout(this.saveTimeout);
+                    
+                    // Vänta ut pågående sparning så vi raderar rätt version
+                    while(this.isSavingDraft) {
+                        await new Promise(r => setTimeout(r, 50));
+                    }
+
+                    if (!this.replyTarget || this.replyTarget === 'undefined') {
+                        this.isDiscarding = false;
+                        return;
+                    }
+
+                    if (confirm(this.t.delete + '?')) {
+                        const fd = new FormData();
+                        fd.append('folder', this.replyFolder || this.currentFolder);
+                        fd.append('uids[]', this.replyTarget);
+                        try {
+                            const res = await fetch('/api/delete_mails', { method: 'POST', body: fd });
+                            const text = await res.text();
+                            if (text === 'OK') window.location.reload();
+                            else { alert(this.t.error + ': ' + text); this.isDiscarding = false; }
+                        } catch(e) { alert(this.t.an_error_occurred); this.isDiscarding = false; }
+                    } else { this.isDiscarding = false; }
                 },
                 async saveDraft(force = false) {
                     // Hantera samtidiga sparningar robust
+                    if (this.isDiscarding) return;
                     if ((this.isSavingDraft || this.isInitializing) && !force) {
                         if (force) {
                             // Om tvingande (t.ex. byter vy), vänta tills nuvarande sparning är klar
@@ -616,7 +598,7 @@
                     if (!this.isDraftEditing && this.replyTarget && this.initialReplyBody && body.trim() === this.initialReplyBody.trim()) return;
 
                     // Spara inte om inget har ändrats sedan sist (förhindrar dubbletter)
-                    if (body === this.lastSavedBody && !force && this.replyTarget) return;
+                    if (body === this.lastSavedBody && !force) return;
                     
                     this.isSavingDraft = true;
                     const fd = new FormData();
@@ -646,6 +628,7 @@
                             this.replyTarget = data.new_uid;
                             this.isDraftEditing = true;
                             this.lastSavedBody = body; // Kom ihåg vad vi sparade
+                            if (data.folder) this.replyFolder = data.folder;
                         }
                         
                         // Uppdatera UI i trådlistan direkt (visa Utkast-badge)
@@ -763,18 +746,6 @@
 </head>
 <body x-data="mailApp" class="flex h-screen text-gray-700">
 
-    <!-- Undo Toast -->
-    <div x-show="showUndo" class="fixed bottom-6 left-6 bg-gray-900 text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-4 z-[80]" x-transition.duration.300ms x-cloak>
-        <span x-text="t.undo_delete"></span>
-        <button @click="clearTimeout(undoTimeout); showUndo = false; deletedUids = deletedUids.filter(uid => !mailsToDelete.includes(uid)); mailsToDelete = []" class="text-blue-300 font-bold hover:text-blue-200 uppercase text-sm tracking-wide" x-text="t.undo"></button>
-    </div>
-
-    <!-- Move Undo Toast -->
-    <div x-show="showMoveUndo" class="fixed bottom-6 left-6 bg-gray-900 text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-4 z-[80]" x-transition.duration.300ms x-cloak>
-        <span x-text="t.undo_move"></span>
-        <button @click="undoMove()" class="text-blue-300 font-bold hover:text-blue-200 uppercase text-sm tracking-wide" x-text="t.undo"></button>
-    </div>
-
     <div class="{{ 'w-56' if settings.get('layout') == 'compact' else 'w-64' }} flex-shrink-0 flex flex-col {{ 'p-2' if settings.get('layout') == 'compact' else 'p-4' }} bg-[#f6f8fc] transition-all duration-300">
         <div class="flex items-center {{ 'mb-4' if settings.get('layout') == 'compact' else 'mb-6' }} px-4 cursor-pointer" @click="activeThread = null; replyTarget = null">
             <img src="{{ url_for('static', filename='zalaso.png') }}" alt="Zalaso" class="{{ 'h-16' if settings.get('layout') == 'compact' else 'h-24' }} w-auto object-contain transition-all">
@@ -864,6 +835,25 @@
                     <button @click="deleteSelected()" class="p-2 hover:bg-red-50 text-gray-600 hover:text-red-600 rounded-full transition" :title="t.delete">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                     </button>
+                    
+                    <!-- Move To Dropdown -->
+                    <div class="relative" x-data="{ open: false }">
+                        <button @click="open = !open" @click.outside="open = false" class="p-2 hover:bg-gray-100 text-gray-600 rounded-full transition" :title="t.move_to">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" /></svg>
+                        </button>
+                        <div x-show="open" class="absolute top-full left-0 mt-1 bg-white shadow-xl rounded-lg py-2 w-56 z-[60] border border-gray-100 text-sm font-medium text-gray-700 max-h-64 overflow-y-auto" x-cloak x-transition>
+                            <div class="px-4 py-2 text-xs text-gray-400 uppercase font-bold" x-text="t.move_to"></div>
+                            {% for f in folders %}
+                            <div @click="moveMail('{{ f.id }}', selectedMails.join(',')); selectedMails = []; open = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3 pl-8">
+                                <span class="truncate">{{ f.name }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <button @click="fetch('/api/mark_read/' + selectedMails.join(',') + '?folder=' + encodeURIComponent(currentFolder)).then(() => window.location.reload())" class="p-2 hover:bg-gray-100 text-gray-600 rounded-full transition" :title="t.mark_read"><svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 19v-8.93a2 2 0 01.89-1.664l7.11-4.83a2 2 0 012.22 0l7.11 4.83a2 2 0 01.89 1.664V19a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg></button>
+                    <button @click="fetch('/api/mark_unread/' + selectedMails.join(',') + '?folder=' + encodeURIComponent(currentFolder)).then(() => window.location.reload())" class="p-2 hover:bg-gray-100 text-gray-600 rounded-full transition" :title="t.mark_unread"><svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg></button>
+
                     <span class="font-medium text-gray-700" x-text="selectedMails.length + ' ' + t.selected"></span>
                     <button @click="selectedMails = []" class="text-sm text-blue-600 font-medium hover:underline" x-text="t.cancel"></button>
                 </div>
@@ -930,8 +920,7 @@
                      draggable="true" @dragstart="$event.dataTransfer.setData('text/plain', '{{ thread_uids }}'); $event.dataTransfer.effectAllowed = 'move';"
                      id="thread-{{ id }}"
                      class="group flex items-center {{ 'p-1.5' if settings.get('layout') == 'compact' else 'p-3.5' }} border border-transparent border-b-gray-300 cursor-pointer hover:bg-white hover:shadow-md hover:z-10 relative transition hover:border-blue-500 hover:ring-1 hover:ring-blue-500"
-                     :class="unread ? 'bg-white font-bold text-gray-900' : 'bg-gray-100 font-normal text-gray-600'"
-                     x-show="!deletedUids.includes('{{ data['msgs'][0]['uid'] }}')">
+                     :class="unread ? 'bg-white font-bold text-gray-900' : 'bg-gray-100 font-normal text-gray-600'">
                     <button @click.stop="toggleStar('{{ data['msgs'][0]['uid'] }}', '{{ data['msgs'][0]['folder'] }}')" class="mr-3 focus:outline-none transition transform hover:scale-110">
                         <span class="text-xl leading-none" :class="starredUids.includes('{{ data['msgs'][0]['uid'] }}') ? 'text-yellow-400' : 'text-gray-300'">★</span>
                     </button>
@@ -1015,7 +1004,7 @@
 
         <div x-show="activeThread !== null" class="absolute inset-0 bg-white z-10 flex flex-col" x-cloak>
             <div class="p-4 border-b border-gray-100 flex items-center gap-4 bg-white sticky top-0 shadow-sm z-30">
-                <button @click="saveDraft(true).then(() => { closeThread(); replyTarget = null; })" class="p-2 hover:bg-gray-100 rounded-full text-blue-600 font-bold transition">← <span x-text="t.inbox"></span></button>
+                <button @click="saveDraft(true).then(() => { window.location.href = '/?folder=' + encodeURIComponent(currentFolder); })" class="p-2 hover:bg-gray-100 rounded-full text-blue-600 font-bold transition">← <span x-text="t.inbox"></span></button>
             </div>
 
             <div class="flex-1 overflow-y-auto bg-[#f8f9fa]">
@@ -1028,54 +1017,29 @@
                         $nextTick(() => {
                             openReply(c.uid, c.to, c.subject, "e30=", c.attachments, true, c.folder);
                         });
-                    } else if ("{{ data.get('has_draft') }}" === "True") {
+                    // FIX: Öppna om has_draft är sant (backend sköter nu detekteringen robust) ELLER om vi är i utkast-mappen
+                    } else if ({{ 'true' if data.get('has_draft') else 'false' }} || "{{ 'draft' in current_folder.lower() or 'utkast' in current_folder.lower() }}" === "True") {
                         const draft = {{ data.get("draft", {}) | tojson }};
-                        if(draft.uid) {
+                        // Om draft-objektet saknas (t.ex. vid failsafe), skapa ett från sista meddelandet
+                        const targetMsg = draft.uid ? draft : {{ (data['msgs'][-1] if data['msgs'] else {}) | tojson }};
+                        
+                        if(targetMsg.uid) {
                             // Om body saknas (t.ex. vid snabb synk), hämta den först
-                            if (!draft.body_safe || draft.body_safe.length === 0) {
-                                fetch(`/api/get_message/${draft.uid}?folder=${encodeURIComponent(draft.folder)}`)
+                            if (!targetMsg.body_safe || targetMsg.body_safe.length === 0) {
+                                fetch(`/api/get_message/${targetMsg.uid}?folder=${encodeURIComponent(targetMsg.folder)}`)
                                     .then(r => r.json())
                                     .then(d => {
                                         // FIX: Öppna alltid, även om body är tom
                                         const body = d.body_safe || "";
-                                        $nextTick(() => openReply(draft.uid, draft.to, draft.subject, body, draft.attachments, true, draft.folder));
+                                        $nextTick(() => openReply(targetMsg.uid, targetMsg.recipients || targetMsg.to || "", targetMsg.subject || {{ data['subject'] | tojson }}, body, targetMsg.attachments, true, targetMsg.folder));
                                     })
                                     .catch(() => {
                                         // Fallback: Öppna tomt om hämtning misslyckas
-                                        $nextTick(() => openReply(draft.uid, draft.to, draft.subject, "", draft.attachments, true, draft.folder));
+                                        $nextTick(() => openReply(targetMsg.uid, targetMsg.recipients || targetMsg.to || "", targetMsg.subject || {{ data['subject'] | tojson }}, "", targetMsg.attachments, true, targetMsg.folder));
                                     });
                             } else {
                                 $nextTick(() => {
-                                    openReply(draft.uid, draft.to, draft.subject, draft.body_safe, draft.attachments, true, draft.folder);
-                                });
-                            }
-                        }
-                    } else if ("{{ "draft" in current_folder.lower() or "utkast" in current_folder.lower() }}" === "True") {
-                        const msgs = {{ data["msgs"] | tojson }};
-                        if(msgs.length > 0) {
-                            // Hitta det bästa meddelandet att öppna (helst ett med innehåll)
-                            let lastMsg = msgs[msgs.length - 1];
-                            const withContent = msgs.filter(m => m.body_safe && m.body_safe.length > 0);
-                            if (withContent.length > 0) {
-                                lastMsg = withContent[withContent.length - 1];
-                            }
-                            
-                            // Samma kontroll här för Drafts-mappen
-                            if (!lastMsg.body_safe || lastMsg.body_safe.length === 0) {
-                                fetch(`/api/get_message/${lastMsg.uid}?folder=${encodeURIComponent(lastMsg.folder)}`)
-                                    .then(r => r.json())
-                                    .then(d => {
-                                        // FIX: Öppna alltid, även om body är tom
-                                        const body = d.body_safe || "";
-                                        $nextTick(() => openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, body, lastMsg.attachments, true, lastMsg.folder));
-                                    })
-                                    .catch(() => {
-                                        // Fallback: Öppna tomt om hämtning misslyckas
-                                        $nextTick(() => openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, "", lastMsg.attachments, true, lastMsg.folder));
-                                    });
-                            } else {
-                                $nextTick(() => {
-                                    openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, lastMsg.body_safe, lastMsg.attachments, true, lastMsg.folder);
+                                    openReply(targetMsg.uid, targetMsg.recipients || targetMsg.to || "", targetMsg.subject || {{ data['subject'] | tojson }}, targetMsg.body_safe, targetMsg.attachments, true, targetMsg.folder);
                                 });
                             }
                         }
@@ -1090,6 +1054,20 @@
                         </div>
                         {% endif %}
                     </div>
+                    
+                    <!-- FIX: Visa utkast separat som en "extra" rad för att garantera åtkomst -->
+                    <div x-show="{{ 'true' if data.get('has_draft') else 'false' }}" class="px-6 py-3 bg-yellow-50 border-b border-yellow-200 flex justify-between items-center">
+                        <div class="flex items-center gap-3">
+                            <span class="text-xl">📝</span>
+                            <div>
+                                <div class="text-sm font-bold text-yellow-900">Ett sparat utkast hittades</div>
+                                <div class="text-xs text-yellow-700">Senast ändrat: <span x-text="'{{ data.get('draft', {}).get('date', '') }}' || 'Nyligen'"></span></div>
+                            </div>
+                        </div>
+                        <button @click="openReply('{{ data.get('draft', {}).get('uid', '') }}', '{{ data.get('draft', {}).get('to', '') }}', '{{ data.get('draft', {}).get('subject', '') }}', '{{ data.get('draft', {}).get('body_safe', '') }}', {{ data.get('draft', {}).get('attachments', []) | tojson }}, true, '{{ data.get('draft', {}).get('folder', '') }}')" class="bg-yellow-100 hover:bg-yellow-200 text-yellow-900 px-4 py-2 rounded-lg text-sm font-bold border border-yellow-300 transition shadow-sm flex items-center gap-2">
+                            <span>✎</span> Fortsätt skriva
+                        </button>
+                    </div>
 
                     {% for msg in data['msgs']|reverse %}
                     <div class="mb-6 mx-4 mt-6 bg-white border border-gray-300 rounded-xl shadow-sm overflow-hidden" @click.stop>
@@ -1101,6 +1079,10 @@
                             <div class="flex items-center gap-3">
                                 <span class="font-normal text-gray-400 text-xs">{{ msg['date'] }}</span>
                                 <button @click.stop="document.getElementById('iframe-{{ msg['uid'] }}').contentWindow.print()" class="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600 transition" :title="t.print"><img src="{{ url_for('static', filename='ikoner/printer.png') }}" class="w-6 h-6 object-contain"></button>
+                                <!-- Manuell redigeringsknapp för egna meddelanden (Failsafe) -->
+                                <button x-show="'{{ msg['from'] }}'.includes('{{ settings.get('email') }}') || '{{ msg['from_full'] }}'.includes('{{ settings.get('email') }}')" 
+                                        @click.stop="openReply('{{ msg['uid'] }}', '{{ data['msgs'][0]['from'] }}', '{{ data['subject'] }}', '{{ msg['body_safe'] }}', {{ msg['attachments'] | tojson }}, true, '{{ msg['folder'] }}')" 
+                                        class="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-blue-600 transition" title="Redigera utkast">✎</button>
                                 <button data-msg="{{ {'tid': id, 'uid': msg['uid'], 'subject': data['subject'], 'attachments': msg['attachments']} | tojson | forceescape | safe }}" @click.stop="forwardMsg($el.dataset.msg)" class="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600 transition" :title="t.forward">➔</button>
                             </div>
                         </div>
@@ -1242,7 +1224,10 @@
                     <div class="bg-gray-50 px-4 py-2 border-b border-gray-300 text-xs font-bold text-gray-500 flex justify-between items-center">
                         <span x-show="!isForward"><span x-text="t.reply_to"></span> <span class="text-gray-800" x-text="replyTo"></span></span>
                         <span x-show="isForward" x-text="t.forwarding"></span>
-                        <button @click="saveDraft(); replyTarget = null" class="p-2 hover:bg-gray-200 rounded-full transition">✕</button>
+                        <div class="flex items-center gap-1">
+                            <button @click="discardDraft()" class="p-2 hover:bg-red-100 text-red-500 rounded-full transition" :title="t.delete">🗑️</button>
+                            <button @click="saveDraft(); replyTarget = null" class="p-2 hover:bg-gray-200 rounded-full transition">✕</button>
+                        </div>
                     </div>
                     <form action="/send" method="POST" enctype="multipart/form-data" class="flex flex-col p-4" @dragover.prevent @drop.prevent="handleFiles($event.dataTransfer.files)" @submit.prevent="if(!replyTo){ alert(t.fill_imap); return; } sendAjax($event, true)">
                         <div x-show="isForward" class="flex items-center mb-4 relative">
@@ -1315,7 +1300,7 @@
          id="context-menu"
          @click.outside="contextMenuOpen = false"
          :style="`top: ${contextMenuY}px; left: ${contextMenuX}px`"
-         class="fixed bg-white shadow-xl rounded-lg py-2 w-56 z-[60] border border-gray-100 text-sm font-medium text-gray-700" x-cloak x-transition>
+         class="fixed bg-white shadow-xl rounded-lg py-2 w-56 z-[60] border border-gray-100 text-sm font-medium text-gray-700 max-h-[90vh] overflow-y-auto" x-cloak x-transition>
         
         <div @click="replyToMsg(JSON.stringify(contextMenuTarget)); contextMenuOpen = false" class="px-4 py-2 hover:bg-gray-100 cursor-pointer flex items-center gap-3">
             <span>↩</span> <span x-text="t.reply"></span>
