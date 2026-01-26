@@ -925,7 +925,7 @@
                 {% set is_forward = 'vb:' in data['subject'].lower() or 'fwd:' in data['subject'].lower() %}
                 <div x-data="{ unread: {{ 'true' if data['unread'] else 'false' }} }" 
                      @click="openThread('{{ id }}'); if(unread){ fetch('/api/mark_read/{{ thread_uids }}?folder=' + encodeURIComponent('{{ current_folder }}')); unread = false; }" 
-                     data-ctx="{{ {'id': id, 'uids': thread_uids, 'from': data['msgs'][0]['from'], 'subject': data['subject'], 'attachments': data['msgs'][0]['attachments']} | tojson | forceescape | safe }}"
+                     data-ctx="{{ {'id': id, 'uids': thread_uids, 'from': data['msgs'][0]['from'] if data['msgs'] else '', 'subject': data['subject'], 'attachments': data['msgs'][0]['attachments'] if data['msgs'] else []} | tojson | forceescape | safe }}"
                      @contextmenu.prevent="openCtxMenu($event, $el.dataset.ctx, unread)"
                      draggable="true" @dragstart="$event.dataTransfer.setData('text/plain', '{{ thread_uids }}'); $event.dataTransfer.effectAllowed = 'move';"
                      id="thread-{{ id }}"
@@ -938,7 +938,7 @@
                     <div class="pr-4 flex items-center" @click.stop>
                         <input type="checkbox" value="{{ data['msgs'][0]['uid'] }}" x-model="selectedMails" class="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer">
                     </div>
-                    <div class="w-56 truncate pr-4 text-sm">{{ data['msgs'][0]['from'] }}</div>
+                    <div class="w-56 truncate pr-4 text-sm">{{ data['msgs'][0]['from'] if data['msgs'] else 'Utkast' }}</div>
                     <div class="flex-1 min-w-0 text-sm flex items-center pr-2">
                         {% if is_forward %}
                         <span class="mr-2 text-gray-500 bg-gray-100 px-1.5 rounded text-xs font-medium border border-gray-200 flex-shrink-0">Vb</span>
@@ -985,7 +985,7 @@
                         {% endif %}
                     </div>
                     <div class="w-32 text-right text-xs relative">
-                        <span class="group-hover:hidden">{{ data['msgs'][0]['date'] }}</span>
+                        <span class="group-hover:hidden">{{ data['msgs'][0]['date'] if data['msgs'] else '' }}</span>
                         <div class="hidden group-hover:flex items-center justify-end gap-1 absolute right-0 top-1/2 -translate-y-1/2">
                             <button @click.stop="trashFolderId && currentFolder !== trashFolderId ? moveMail(trashFolderId, '{{ thread_uids }}') : deleteThread('{{ thread_uids }}')" class="p-2 hover:bg-gray-200 rounded-full text-gray-500 hover:text-red-600 transition" :title="t.delete">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>

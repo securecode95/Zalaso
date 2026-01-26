@@ -1310,8 +1310,7 @@ def index():
                     'body_safe': safe_body,
                     'attachments': atts
                 }
-                # Hoppa över att lägga till i msgs så det inte syns i listan
-                continue
+                # Vi lägger till det i msgs ändå, och filtrerar senare om det behövs (för att undvika tomma trådar)
 
             # Datumformatering likt Gmail
             date_str = ""
@@ -1446,6 +1445,15 @@ def index():
                                     # Dölj utkastet från den vanliga meddelandelistan så det inte ser ut som ett mottaget mail
                                     tdata['msgs'] = [m for m in tdata['msgs'] if str(m['uid']) != str(d_msg.uid)]
                                 break
+        
+        # Filtrera bort utkast från meddelandelistan om det finns andra meddelanden i tråden
+        # (Så att man inte ser sitt eget utkast som ett "svar" i tråden, om man inte är i Utkast-mappen)
+        is_draft_view = 'draft' in folder.lower() or 'utkast' in folder.lower()
+        if not is_draft_view:
+            for tid, data in threads.items():
+                if data.get('has_draft') and len(data['msgs']) > 1:
+                    draft_uid = data['draft']['uid']
+                    data['msgs'] = [m for m in data['msgs'] if m['uid'] != draft_uid]
 
         total_pages = max(1, (total + per_page - 1) // per_page)
         
@@ -2288,7 +2296,8 @@ def save_draft():
                         recent_msgs = mb.fetch(limit=20, reverse=True)
                         matching_msgs = []
                         for m in recent_msgs:
-                            if m.headers.get('x-zalaso-draft-id', [''])[0] == draft_id:
+                            h_val = m.headers.get('x-zalaso-draft-id', [])
+                            if h_val and h_val[0] == draft_id:
                                 matching_msgs.append(m)
                         
                         if not new_uid and matching_msgs:
