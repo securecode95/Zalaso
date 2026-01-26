@@ -7,7 +7,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 from datetime import date, timedelta, datetime, timezone
 from email.utils import formatdate
-import sqlite3
+import sqlite3, uuid
 import threading
 
 try:
@@ -485,6 +485,9 @@ def init_db():
         try:
             conn.execute('ALTER TABLE emails ADD COLUMN labels TEXT')
         except: pass
+        try:
+            conn.execute('ALTER TABLE emails ADD COLUMN is_draft INTEGER DEFAULT 0')
+        except: pass
         conn.execute('''CREATE VIRTUAL TABLE IF NOT EXISTS emails_fts USING fts5(subject, sender, body, content='emails', content_rowid='rowid')''')
         conn.execute('''CREATE TRIGGER IF NOT EXISTS emails_ai AFTER INSERT ON emails BEGIN
             INSERT INTO emails_fts(rowid, subject, sender, body) VALUES (new.rowid, new.subject, new.sender, new.body);
@@ -670,13 +673,16 @@ def sync_worker(folder):
                             except: pass
                             recipients_str = ", ".join(recipients)
 
-                            new_rows.append((msg.uid, folder, msg.subject or "", sender_name, "", "", d_iso, d_str, "[]", recipients_str, json.dumps(applied_labels)))
+                            # Identifiera utkast via flaggor eller header
+                            is_draft = 1 if ('\\Draft' in msg.flags or 'draft' in msg.flags or (msg.headers and msg.headers.get('x-zalaso-draft-id'))) else 0
+
+                            new_rows.append((msg.uid, folder, msg.subject or "", sender_name, "", "", d_iso, d_str, "[]", recipients_str, json.dumps(applied_labels), is_draft))
                     except Exception as e:
                         log_event(f"Fel vid hämtning av mail (chunk {i}): {e}")
                     
                     if new_rows:
                         with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
-                            conn.executemany("INSERT OR REPLACE INTO emails (uid, folder, subject, sender, body, html, date_iso, date_str, attachments, recipients, labels) VALUES (?,?,?,?,?,?,?,?,?,?,?)", new_rows)
+                            conn.executemany("INSERT OR REPLACE INTO emails (uid, folder, subject, sender, body, html, date_iso, date_str, attachments, recipients, labels, is_draft) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", new_rows)
                     
                     # Flytta spam
                     if spam_uids and spam_folder:
@@ -754,15 +760,21 @@ def sync_worker(folder):
                     
                     read_updates = {}
                     star_updates = {}
+                    draft_updates = []
                     for uid in uid_str:
                         flags = flags_map.get(uid, [])
                         is_read = '\\Seen' in flags
                         is_starred = '\\Flagged' in flags
+                        is_draft = 1 if '\\Draft' in flags else 0
                         read_updates[uid] = is_read
                         star_updates[uid] = is_starred
+                        draft_updates.append((is_draft, uid, folder))
                     
                     update_local_status_batch(folder, read_updates)
                     update_star_status_batch(folder, star_updates)
+                    
+                    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+                        conn.executemany("UPDATE emails SET is_draft=? WHERE uid=? AND folder=?", draft_updates)
             except Exception as e: log_event(f"Flag sync error: {e}")
     except Exception as e:
         log_event(f"Synkroniseringsfel för {folder}: {e}")
@@ -784,6 +796,7 @@ class MockMsg:
         self.flags = []
         self.attachments = []
         self.labels = []
+        self.is_draft = False
 
         try:
             if row:
@@ -810,6 +823,9 @@ class MockMsg:
                 if 'labels' in row.keys() and row['labels']:
                     try: self.labels = json.loads(row['labels'])
                     except: pass
+                
+                if 'is_draft' in row.keys() and row['is_draft']:
+                    self.is_draft = True
         except: pass
 
 def move_existing_spam(sender):
@@ -1231,11 +1247,19 @@ def index():
             clean_subj = (msg.subject or "Inget ämne").replace('Re: ','').replace('Sv: ','').strip()
             
             # Logik för trådning:
+            
+            # Om mailet är markerat som utkast i DB (is_draft=1), behandla det som utkast direkt
+            # Detta fixar problemet med att utkast visas som vanliga mail i Inkorgen
+            is_real_draft = getattr(msg, 'is_draft', False)
+            
+            # ... (resten av koden)
+            
+            # Logik för trådning:
             # Separera utkast och mail utan ämne för att undvika problem med radering
             is_draft = 'draft' in folder.lower() or 'utkast' in folder.lower()
             has_no_subject = not msg.subject or not msg.subject.strip()
             
-            if is_draft or has_no_subject:
+            if is_draft or has_no_subject or is_real_draft:
                 unique_key = f"{msg.uid}_{getattr(msg, 'original_folder', folder)}"
                 tid = hashlib.md5(unique_key.encode()).hexdigest()
             else:
@@ -1274,6 +1298,20 @@ def index():
                 safe_html = (msg.text or "").replace('\n', '<br>')
 
             safe_body = base64.b64encode((safe_html or "").encode('utf-8', 'ignore')).decode('utf-8')
+
+            # Om det är ett identifierat utkast, lägg det i draft-objektet istället för msgs-listan
+            if is_real_draft:
+                threads[tid]['has_draft'] = True
+                threads[tid]['draft'] = {
+                    'uid': str(msg.uid),
+                    'folder': getattr(msg, 'original_folder', folder),
+                    'to': getattr(msg, 'recipients', ""),
+                    'subject': msg.subject,
+                    'body_safe': safe_body,
+                    'attachments': atts
+                }
+                # Hoppa över att lägga till i msgs så det inte syns i listan
+                continue
 
             # Datumformatering likt Gmail
             date_str = ""
@@ -1364,29 +1402,49 @@ def index():
                     except: pass
 
                     placeholders = ','.join('?' * len(draft_folders))
-                    draft_rows = conn.execute(f"SELECT * FROM emails WHERE folder IN ({placeholders})", draft_folders).fetchall()
+                    # Sortera på UID ASC så att det senaste utkastet alltid skrivs över sist i loopen nedan
+                    draft_rows = conn.execute(f"SELECT * FROM emails WHERE folder IN ({placeholders}) AND uid IS NOT NULL AND uid != 0 ORDER BY uid ASC", draft_folders).fetchall()
                     
                     for r in draft_rows:
-                        d_subj = (r['subject'] or "").replace('Re: ','').replace('Sv: ','').replace('Fwd: ','').replace('Vb: ','').strip()
+                        # Robustare matchning av ämne (hantera olika prefix och case)
+                        d_subj = (r['subject'] or "").strip()
+                        for prefix in ['re:', 'sv:', 'fwd:', 'vb:', 'aw:', 'wg:']:
+                            if d_subj.lower().startswith(prefix) or d_subj.lower().startswith(prefix + " "):
+                                d_subj = d_subj[len(prefix):].strip()
+                        
                         for tid, tdata in threads.items():
                             if tdata['subject'] == d_subj:
-                                tdata['has_draft'] = True
-                                # Förbered utkast-data för frontend
-                                d_msg = MockMsg(r)
-                                body_html = d_msg.html or ""
-                                if not body_html and d_msg.text: body_html = f"<pre>{d_msg.text}</pre>"
-                                safe_html = body_html
-                                if safe_html: safe_html = re.sub(r'<script[^>]*>.*?</script>', '', safe_html, flags=re.DOTALL|re.IGNORECASE)
-                                safe_body = base64.b64encode((safe_html or "").encode('utf-8', 'ignore')).decode('utf-8')
+                                # Logik för att välja BÄSTA utkastet (prioritera innehåll över tomt)
+                                current_draft = tdata.get('draft')
+                                new_has_content = bool(r['body'] or r['html'])
+                                current_has_content = False
+                                if current_draft and current_draft.get('body_safe'):
+                                    current_has_content = True
                                 
-                                tdata['draft'] = {
-                                    'uid': str(d_msg.uid),
-                                    'folder': r['folder'],
-                                    'to': r['recipients'] or "",
-                                    'subject': r['subject'],
-                                    'body_safe': safe_body,
-                                    'attachments': d_msg.attachments_data
-                                }
+                                # Uppdatera om: Inget utkast finns, ELLER nytt har innehåll men inte gamla, ELLER nytt är nyare (och båda har/saknar innehåll)
+                                should_update = not current_draft or (new_has_content and not current_has_content) or (new_has_content == current_has_content)
+                                
+                                if should_update:
+                                    tdata['has_draft'] = True
+                                    # Förbered utkast-data för frontend
+                                    d_msg = MockMsg(r)
+                                    body_html = d_msg.html or ""
+                                    if not body_html and d_msg.text: body_html = f"<pre>{d_msg.text}</pre>"
+                                    safe_html = body_html
+                                    if safe_html: safe_html = re.sub(r'<script[^>]*>.*?</script>', '', safe_html, flags=re.DOTALL|re.IGNORECASE)
+                                    safe_body = base64.b64encode((safe_html or "").encode('utf-8', 'ignore')).decode('utf-8')
+                                    
+                                    tdata['draft'] = {
+                                        'uid': str(d_msg.uid),
+                                        'folder': r['folder'],
+                                        'to': r['recipients'] or "",
+                                        'subject': r['subject'],
+                                        'body_safe': safe_body,
+                                        'attachments': d_msg.attachments_data
+                                    }
+                                    
+                                    # Dölj utkastet från den vanliga meddelandelistan så det inte ser ut som ett mottaget mail
+                                    tdata['msgs'] = [m for m in tdata['msgs'] if str(m['uid']) != str(d_msg.uid)]
                                 break
 
         total_pages = max(1, (total + per_page - 1) // per_page)
@@ -2084,8 +2142,13 @@ def save_draft():
         msg['To'] = request.form.get('to')
         msg['Date'] = formatdate(localtime=True)
         
+        # Unikt ID för att kunna hitta utkastet igen om servern inte ger UID direkt
+        draft_id = request.form.get('draft_id')
+        if not draft_id: draft_id = str(uuid.uuid4())
+        msg['X-Zalaso-Draft-ID'] = draft_id
+        
         log_event("Sparar utkast")
-        body = (request.form.get('body') or "").replace('\n','<br>')
+        body = request.form.get('body') or ""
         
         # Hantera vidarebefordrade filer (Samma logik som send)
         forward_uid = request.form.get('forward_uid')
@@ -2145,30 +2208,126 @@ def save_draft():
         with get_mailbox() as mb:
             draft_folder = None
             for f in mb.folder.list():
-                if 'draft' in f.name.lower() or 'utkast' in f.name.lower():
+                if f.name in ['Drafts', 'Utkast', 'INBOX.Drafts', 'INBOX.Utkast']:
                     draft_folder = f.name
                     break
             
             if not draft_folder:
+                for f in mb.folder.list():
+                    name = f.name.lower()
+                    # Ensure we don't match INBOX itself, only folders containing 'draft' or 'utkast'
+                    if ('draft' in name or 'utkast' in name) and name != 'inbox' and name != 'inbox.':
+                        draft_folder = f.name
+                        break
+            
+            if not draft_folder:
                 draft_folder = 'INBOX.Drafts' # Fallback
+                # Försök skapa mappen om den inte finns (viktigt för att undvika att mail hamnar i INBOX)
+                try:
+                    folder_exists = False
+                    for f in mb.folder.list():
+                        if f.name == draft_folder:
+                            folder_exists = True
+                            break
+                    if not folder_exists:
+                        mb.folder.create(draft_folder)
+                except: pass
 
             try:
-                mb.append(msg.as_bytes(), draft_folder, flag_set=['\\Draft', '\\Seen'])
+                result = mb.append(msg.as_bytes(), draft_folder, flag_set=['\\Draft', '\\Seen'])
+                
+                # Hämta nya UID om möjligt (för att uppdatera klienten och undvika dubbletter)
+                new_uid = None
+                if hasattr(result, 'uid'):
+                    new_uid = result.uid
+                
+                # Markera som läst explicit (vissa servrar ignorerar flag_set i append)
+                if new_uid:
+                    try: mb.flag([new_uid], '\\Seen', True)
+                    except: pass
+                
+                # Om servern inte returnerade UID (vanligt), sök upp det via vårt unika ID
+                if not new_uid:
+                    try:
+                        mb.folder.set(draft_folder)
+                        # Sök efter header X-Zalaso-Draft-ID med retry (viktigt för att undvika dubbletter)
+                        for _ in range(5):
+                            for m in mb.fetch(A(header=['X-Zalaso-Draft-ID', draft_id]), limit=1):
+                                new_uid = m.uid
+                                break
+                            if new_uid: break
+                            
+                            # Fallback: Om header-sökning misslyckas, sök på ämne (sista utvägen)
+                            if not new_uid and request.form.get('subject'):
+                                for m in mb.fetch(A(subject=request.form.get('subject')), limit=1, reverse=True):
+                                    new_uid = m.uid
+                                    break
+                                if new_uid: break
+                            time.sleep(0.5)
+                    except: pass
                 
                 # Radera gammalt utkast om vi uppdaterar ett befintligt
                 old_uid = request.form.get('old_uid')
+                old_folder = request.form.get('old_folder')
                 if old_uid:
                     try:
-                        mb.folder.set(draft_folder)
+                        # Använd rätt mapp för radering (om utkastet låg i en annan mapp än standard)
+                        target_folder = old_folder if old_folder else draft_folder
+                        mb.folder.set(target_folder)
                         mb.delete(old_uid)
                         try: mb.expunge()
                         except: pass
                     except: pass
 
+                # Städa ALLTID upp dubbletter baserat på draft_id (Session ID)
+                # Detta fångar fall där frontend missat UID eller om servern skapat kopior
+                if draft_id:
+                    try:
+                        mb.folder.set(draft_folder)
+                        # Manuell sökning i de senaste 20 mailen för att kringgå indexeringsproblem
+                        recent_msgs = mb.fetch(limit=20, reverse=True)
+                        matching_msgs = []
+                        for m in recent_msgs:
+                            if m.headers.get('x-zalaso-draft-id', [''])[0] == draft_id:
+                                matching_msgs.append(m)
+                        
+                        if not new_uid and matching_msgs:
+                            matching_msgs.sort(key=lambda x: x.uid, reverse=True)
+                            new_uid = matching_msgs[0].uid
+                        
+                        for m in matching_msgs:
+                            if str(m.uid) != str(new_uid):
+                                mb.delete(m.uid)
+                        
+                        # Tvinga servern att utföra raderingen
+                        try: mb.expunge()
+                        except: pass
+                    except: pass
+
+                # Uppdatera lokal DB direkt så innehållet syns omedelbart (fixar tomt inline reply)
+                if new_uid:
+                    try:
+                        # Extrahera ren text för sökbarhet och preview (body-kolumnen)
+                        plain_text = re.sub('<[^<]+?>', '', body)
+                        
+                        with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+                            d_iso = datetime.now().isoformat()
+                            d_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+                            sender_name = cfg['email']
+                            recipients = request.form.get('to') or ""
+                            # Vi sparar en tom lista för attachments just nu för enkelhetens skull, 
+                            # sync_worker kommer fixa detaljerna senare. Det viktiga är body.
+                            conn.execute("""INSERT OR REPLACE INTO emails 
+                                (uid, folder, subject, sender, body, html, date_iso, date_str, attachments, recipients, labels, is_draft) 
+                                VALUES (?,?,?,?,?,?,?,?,?,?,?,1)""", 
+                                (new_uid, draft_folder, request.form.get('subject'), sender_name, plain_text, body, d_iso, d_str, "[]", recipients, "[]"))
+                    except Exception as e:
+                        log_event(f"Kunde inte snabbuppdatera DB för utkast: {e}")
+
                 threading.Thread(target=sync_worker, args=(draft_folder,), daemon=True).start()
-                return "Saved"
-            except: return "Error saving draft"
-    except Exception as e: return str(e)
+                return json.dumps({'status': 'Saved', 'new_uid': str(new_uid) if new_uid else None})
+            except: return json.dumps({'status': 'Error', 'message': 'Kunde inte spara utkast'})
+    except Exception as e: return json.dumps({'status': 'Error', 'message': str(e)})
 
 @app.route('/save_settings', methods=['POST'])
 def save_settings():

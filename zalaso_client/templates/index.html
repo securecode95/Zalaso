@@ -48,8 +48,13 @@
                 replyTo: '',
                 replySubj: '',
                 replyBody: '',
+                draftsCache: {},
+                initialReplyBody: '',
+                currentDraftId: null,
+                lastSavedBody: '',
                 replyFolder: null,
                 isDraftEditing: false,
+                isInitializing: false,
                 attachments: [],
                 forwardAttachments: [],
                 isForward: false,
@@ -112,6 +117,12 @@
                 parseJSON(str) {
                     try { return JSON.parse(str); } catch(e) { console.error(e); return {}; }
                 },
+                generateUUID() {
+                    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                        var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                        return v.toString(16);
+                    });
+                },
                 async fetchBodyIfNeeded(m) {
                     if (!m.body) {
                         try {
@@ -164,7 +175,6 @@
                         this.activeThread = t || null;
                     });
 
-                    this.$watch('showCompose', v => !v && this.saveDraft());
                     window.addEventListener('beforeunload', (e) => { 
                         if (this.showUndo) {
                             const fd = new FormData();
@@ -274,11 +284,14 @@
                 },
                 openCompose() {
                     this.showCompose = true;
+                    this.currentDraftId = this.generateUUID();
                     this.composeTo = '';
                     this.composeSubj = '';
                     this.composeBody = this.signature ? '<br><br>' + this.signature.replace(/\n/g, '<br>') : '';
                     this.composeAttachments = [];
                     this.contactSuggestions = [];
+                    this.replyTarget = null;
+                    this.isDraftEditing = false;
                     this.showContactSuggestions = false;
                     this.showReplyContactSuggestions = false;
                     setTimeout(() => {
@@ -404,6 +417,8 @@
                     }
                 },
                 openReply(uid, to, subj, base64Body, attachments, isDraft = false, folder = null) {
+                    this.isInitializing = true; // Lås autospar tills vi är klara
+                    this.currentDraftId = this.generateUUID();
                     this.replyTarget = uid;
                     this.replyTo = to;
                     this.replySubj = subj;
@@ -415,8 +430,17 @@
                     this.showReplyContactSuggestions = false;
                     try {
                         let decoded = decodeURIComponent(escape(atob(base64Body)));
+                        // Kolla cache först (om vi nyss redigerade detta utkast)
+                        if (isDraft && this.activeThread && this.draftsCache[this.activeThread]) {
+                            const cached = this.draftsCache[this.activeThread];
+                            decoded = cached.body;
+                            if (cached.attachments) this.attachments = [...cached.attachments];
+                            if (cached.forwardAttachments) this.forwardAttachments = [...cached.forwardAttachments];
+                        }
                         if (isDraft) {
                             this.replyBody = decoded;
+                            this.lastSavedBody = decoded; // Initiera för att undvika onödig sparning direkt
+                            this.initialReplyBody = decoded;
                         } else {
                             let sig = this.signature ? '<br><br>' + this.signature.replace(/\n/g, '<br>') : '';
                             if (this.isForward) {
@@ -427,12 +451,26 @@
                         }
                     } catch(e) { this.replyBody = ''; }
                     
-                    setTimeout(() => {
+                    // Använd $nextTick för att garantera att DOM är redo innan vi sätter innehåll
+                    this.$nextTick(() => {
                         const editor = document.getElementById('reply-editor');
-                        if(editor) editor.innerHTML = this.replyBody;
-                        if(editor) { editor.focus(); }
+                        if(editor) {
+                            editor.innerHTML = this.replyBody;
+                            editor.focus();
+                            // Flytta markör till slutet
+                            const range = document.createRange();
+                            range.selectNodeContents(editor);
+                            range.collapse(false);
+                            const sel = window.getSelection();
+                            sel.removeAllRanges();
+                            sel.addRange(range);
+                            
+                            // Spara undan start-läget för att kunna jämföra senare (förhindra tomma utkast)
+                            if (!isDraft) this.initialReplyBody = editor.innerHTML;
+                        }
                         this.updateFileInput();
-                    }, 0);
+                        setTimeout(() => this.isInitializing = false, 500); // Släpp låset efter en kort stund
+                    });
                 },
                 handleFiles(files) {
                     if (!files) return;
@@ -520,11 +558,32 @@
                     this.deletedUids = this.deletedUids.filter(uid => !this.mailsToMove.includes(uid));
                     this.mailsToMove = [];
                 },
-                async saveDraft() {
-                    if (this.isSavingDraft || this.isSending) return;
+                async saveDraft(force = false) {
+                    // Hantera samtidiga sparningar robust
+                    if ((this.isSavingDraft || this.isInitializing) && !force) {
+                        if (force) {
+                            // Om tvingande (t.ex. byter vy), vänta tills nuvarande sparning är klar
+                            while(this.isSavingDraft) {
+                                await new Promise(r => setTimeout(r, 50));
+                            }
+                        } else {
+                            return; // Ignorera autospar om vi redan sparar
+                        }
+                    }
                     
                     let to, subj, body, files, forwardUid, forwardFiles;
                     const currentFolder = this.currentFolder;
+
+                    // Säkra att vi har senaste innehållet från editorn direkt från DOM
+                    if (this.showCompose) {
+                        const el = document.getElementById('compose-editor');
+                        if (el) this.composeBody = el.innerHTML;
+                    } else if (this.replyTarget && !this.isInitializing) {
+                        const el = document.getElementById('reply-editor');
+                        // Använd DOM-innehåll om det finns, annars fallback till variabeln (förhindrar tomt sparande vid init)
+                        if (el && el.innerHTML) this.replyBody = el.innerHTML;
+                        else if (this.replyBody && (!el || !el.innerHTML)) { /* Behåll replyBody */ }
+                    }
 
                     if (this.showCompose) {
                         to = this.composeTo;
@@ -545,13 +604,26 @@
                     }
 
                     const emptySig = this.signature ? '<br><br>' + this.signature.replace(/\n/g, '<br>') : '';
-                    if (!to && !subj && (!body || body === emptySig || body.trim() === '')) return;
+                    
+                    // Strippa HTML för att se om det finns riktig text (förhindrar tomma utkast)
+                    const tempDiv = document.createElement('div');
+                    tempDiv.innerHTML = body;
+                    const textContent = tempDiv.textContent || tempDiv.innerText || "";
+                    if (!to && !subj && !files.length && !textContent.trim() && !body.includes('<img')) return;
+                    
+                    // Spara inte om vi bara har signatur/citat kvar (förhindrar "tomma" utkast vid svar)
+                    // Vi jämför med initialReplyBody som sattes när vi öppnade svarsrutan
+                    if (!this.isDraftEditing && this.replyTarget && this.initialReplyBody && body.trim() === this.initialReplyBody.trim()) return;
+
+                    // Spara inte om inget har ändrats sedan sist (förhindrar dubbletter)
+                    if (body === this.lastSavedBody && !force && this.replyTarget) return;
                     
                     this.isSavingDraft = true;
                     const fd = new FormData();
                     fd.append('to', to);
                     fd.append('subject', subj);
                     fd.append('body', body);
+                    if (this.currentDraftId) fd.append('draft_id', this.currentDraftId);
                     if (files) files.forEach(f => fd.append('files', f));
                     
                     if (forwardUid) {
@@ -564,9 +636,37 @@
 
                     if (this.isDraftEditing && this.replyTarget) {
                         fd.append('old_uid', this.replyTarget);
+                        fd.append('old_folder', this.replyFolder); // Skicka med mapp för att kunna radera korrekt
                     }
                     
-                    try { await fetch('/api/save_draft', { method: 'POST', body: fd, keepalive: true }); } catch(e) {}
+                    try { 
+                        const res = await fetch('/api/save_draft', { method: 'POST', body: fd, keepalive: true });
+                        const data = await res.json();
+                        if (data.new_uid) {
+                            this.replyTarget = data.new_uid;
+                            this.isDraftEditing = true;
+                            this.lastSavedBody = body; // Kom ihåg vad vi sparade
+                        }
+                        
+                        // Uppdatera UI i trådlistan direkt (visa Utkast-badge)
+                        if (this.activeThread) {
+                            const badge = document.getElementById('draft-badge-' + this.activeThread);
+                            if (badge) badge.style.display = 'inline-block';
+                        }
+                    } catch(e) {}
+                    
+                    // Uppdatera cache så vi ser ändringarna direkt om vi går tillbaka
+                    if (this.activeThread && !this.showCompose) {
+                        this.draftsCache[this.activeThread] = {
+                            uid: this.replyTarget,
+                            to: to,
+                            subject: subj,
+                            body: body,
+                            attachments: [...this.attachments],
+                            forwardAttachments: [...this.forwardAttachments],
+                            folder: this.replyFolder || currentFolder
+                        };
+                    }
                     this.isSavingDraft = false;
                 },
                 async sendAjax(e, isReply) {
@@ -606,6 +706,7 @@
                             this.replyBody = '';
                             this.attachments = [];
                             this.forwardAttachments = [];
+                            if(this.activeThread) delete this.draftsCache[this.activeThread];
                         } else {
                             this.composeTo = '';
                             this.composeSubj = '';
@@ -827,6 +928,7 @@
                      data-ctx="{{ {'id': id, 'uids': thread_uids, 'from': data['msgs'][0]['from'], 'subject': data['subject'], 'attachments': data['msgs'][0]['attachments']} | tojson | forceescape | safe }}"
                      @contextmenu.prevent="openCtxMenu($event, $el.dataset.ctx, unread)"
                      draggable="true" @dragstart="$event.dataTransfer.setData('text/plain', '{{ thread_uids }}'); $event.dataTransfer.effectAllowed = 'move';"
+                     id="thread-{{ id }}"
                      class="group flex items-center {{ 'p-1.5' if settings.get('layout') == 'compact' else 'p-3.5' }} border border-transparent border-b-gray-300 cursor-pointer hover:bg-white hover:shadow-md hover:z-10 relative transition hover:border-blue-500 hover:ring-1 hover:ring-blue-500"
                      :class="unread ? 'bg-white font-bold text-gray-900' : 'bg-gray-100 font-normal text-gray-600'"
                      x-show="!deletedUids.includes('{{ data['msgs'][0]['uid'] }}')">
@@ -841,7 +943,7 @@
                         {% if is_forward %}
                         <span class="mr-2 text-gray-500 bg-gray-100 px-1.5 rounded text-xs font-medium border border-gray-200 flex-shrink-0">Vb</span>
                         {% endif %}
-                        <span x-show="{{ 'true' if data.get('has_draft') else 'false' }}" x-cloak class="mr-2 bg-yellow-100 text-yellow-800 border border-yellow-200 font-bold text-xs px-2 py-0.5 rounded uppercase tracking-wider">Utkast</span>
+                        <span id="draft-badge-{{ id }}" x-show="{{ 'true' if data.get('has_draft') else 'false' }}" x-cloak class="mr-2 bg-yellow-100 text-yellow-800 border border-yellow-200 font-bold text-xs px-2 py-0.5 rounded uppercase tracking-wider">Utkast</span>
                         {% for l_id in data['labels'] %}
                             {% if l_id in labels_map %}
                             <span class="mr-2 px-2 py-0.5 rounded text-[10px] font-bold text-white flex-shrink-0" style="background-color: {{ labels_map[l_id]['color'] }}">{{ labels_map[l_id]['name'] }}</span>
@@ -904,9 +1006,8 @@
                 {% endfor %}
 
                 {% if not threads and not query %}
-                <div class="flex flex-col items-center justify-center h-full pb-20 text-gray-400" x-init="setTimeout(() => window.location.reload(), 2000)">
-                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mb-4"></div>
-                    <p>Synkroniserar...</p>
+                <div class="flex flex-col items-center justify-center h-full pb-20 text-gray-400">
+                    <p>Inga meddelanden</p>
                 </div>
                 {% endif %}
             </div>
@@ -914,27 +1015,69 @@
 
         <div x-show="activeThread !== null" class="absolute inset-0 bg-white z-10 flex flex-col" x-cloak>
             <div class="p-4 border-b border-gray-100 flex items-center gap-4 bg-white sticky top-0 shadow-sm z-30">
-                <button @click="saveDraft(); setTimeout(() => { closeThread(); replyTarget = null; }, 50)" class="p-2 hover:bg-gray-100 rounded-full text-blue-600 font-bold transition">← <span x-text="t.inbox"></span></button>
+                <button @click="saveDraft(true).then(() => { closeThread(); replyTarget = null; })" class="p-2 hover:bg-gray-100 rounded-full text-blue-600 font-bold transition">← <span x-text="t.inbox"></span></button>
             </div>
 
             <div class="flex-1 overflow-y-auto bg-[#f8f9fa]">
                 {% for id, data in threads.items() %}
                 <template x-if="activeThread === '{{ id }}'">
                 <div class="w-full pb-24" x-init='
-                    if ("{{ data.get("has_draft") }}" === "True") {
+                    // Kolla cache först - om vi har en lokal version, använd den!
+                    if (draftsCache["{{ id }}"]) {
+                        const c = draftsCache["{{ id }}"];
+                        $nextTick(() => {
+                            openReply(c.uid, c.to, c.subject, "e30=", c.attachments, true, c.folder);
+                        });
+                    } else if ("{{ data.get('has_draft') }}" === "True") {
                         const draft = {{ data.get("draft", {}) | tojson }};
                         if(draft.uid) {
-                            $nextTick(() => {
-                                openReply(draft.uid, draft.to, draft.subject, draft.body_safe, draft.attachments, true, draft.folder);
-                            });
+                            // Om body saknas (t.ex. vid snabb synk), hämta den först
+                            if (!draft.body_safe || draft.body_safe.length === 0) {
+                                fetch(`/api/get_message/${draft.uid}?folder=${encodeURIComponent(draft.folder)}`)
+                                    .then(r => r.json())
+                                    .then(d => {
+                                        // FIX: Öppna alltid, även om body är tom
+                                        const body = d.body_safe || "";
+                                        $nextTick(() => openReply(draft.uid, draft.to, draft.subject, body, draft.attachments, true, draft.folder));
+                                    })
+                                    .catch(() => {
+                                        // Fallback: Öppna tomt om hämtning misslyckas
+                                        $nextTick(() => openReply(draft.uid, draft.to, draft.subject, "", draft.attachments, true, draft.folder));
+                                    });
+                            } else {
+                                $nextTick(() => {
+                                    openReply(draft.uid, draft.to, draft.subject, draft.body_safe, draft.attachments, true, draft.folder);
+                                });
+                            }
                         }
                     } else if ("{{ "draft" in current_folder.lower() or "utkast" in current_folder.lower() }}" === "True") {
                         const msgs = {{ data["msgs"] | tojson }};
                         if(msgs.length > 0) {
-                            const lastMsg = msgs[msgs.length - 1];
-                            $nextTick(() => {
-                                openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, lastMsg.body_safe, lastMsg.attachments, true, lastMsg.folder);
-                            });
+                            // Hitta det bästa meddelandet att öppna (helst ett med innehåll)
+                            let lastMsg = msgs[msgs.length - 1];
+                            const withContent = msgs.filter(m => m.body_safe && m.body_safe.length > 0);
+                            if (withContent.length > 0) {
+                                lastMsg = withContent[withContent.length - 1];
+                            }
+                            
+                            // Samma kontroll här för Drafts-mappen
+                            if (!lastMsg.body_safe || lastMsg.body_safe.length === 0) {
+                                fetch(`/api/get_message/${lastMsg.uid}?folder=${encodeURIComponent(lastMsg.folder)}`)
+                                    .then(r => r.json())
+                                    .then(d => {
+                                        // FIX: Öppna alltid, även om body är tom
+                                        const body = d.body_safe || "";
+                                        $nextTick(() => openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, body, lastMsg.attachments, true, lastMsg.folder));
+                                    })
+                                    .catch(() => {
+                                        // Fallback: Öppna tomt om hämtning misslyckas
+                                        $nextTick(() => openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, "", lastMsg.attachments, true, lastMsg.folder));
+                                    });
+                            } else {
+                                $nextTick(() => {
+                                    openReply(lastMsg.uid, lastMsg.recipients || lastMsg.from, lastMsg.subject || {{ data["subject"] | tojson }}, lastMsg.body_safe, lastMsg.attachments, true, lastMsg.folder);
+                                });
+                            }
                         }
                     }
                 '>
@@ -1520,10 +1663,10 @@
 
     <!-- Compose Modal -->
     <div x-show="showCompose" class="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center" x-cloak>
-        <div class="bg-white rounded-2xl w-full max-w-4xl h-[80vh] shadow-2xl flex flex-col" @click.away="if(!composeTo && !composeSubj && !composeBody) showCompose = false">
+        <div class="bg-white rounded-2xl w-full max-w-4xl h-[80vh] shadow-2xl flex flex-col" @click.away="if(!composeTo && !composeSubj && !composeBody) { showCompose = false; replyTarget = null; } else { saveDraft().then(() => { showCompose = false; replyTarget = null; }); }">
             <div class="flex justify-between items-center p-4 border-b bg-gray-50 rounded-t-2xl">
                 <span class="font-bold text-gray-700" x-text="t.new_message"></span>
-                <button @click="showCompose = false" class="text-gray-500 hover:bg-gray-200 rounded-full p-1">✕</button>
+                <button @click="saveDraft().then(() => { showCompose = false; replyTarget = null; })" class="text-gray-500 hover:bg-gray-200 rounded-full p-1">✕</button>
             </div>
             <form action="/send" method="POST" enctype="multipart/form-data" class="flex-1 flex flex-col min-h-0" @dragover.prevent @drop.prevent="handleComposeFiles($event.dataTransfer.files)" @submit.prevent="sendAjax($event, false)">
                 <div class="px-4 py-3 relative">
